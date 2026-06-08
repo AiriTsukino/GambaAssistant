@@ -1,0 +1,51 @@
+using Dalamud.Configuration;
+using GambaAssistant.Models.Ledger;
+
+namespace GambaAssistant;
+
+[Serializable]
+public sealed class Configuration : IPluginConfiguration
+{
+    public int Version { get; set; } = 1;
+    public bool WindowVisible { get; set; }
+    public bool SettingsWindowVisible { get; set; }
+    public Guid ActiveProfileId { get; set; }
+    public bool DemoModeEnabled { get; set; }
+    public OverlaySettings Overlay { get; set; } = new();
+    public GeneralSettings General { get; set; } = new();
+    public DeathRollSettings DeathRoll { get; set; } = new();
+}
+
+[Serializable]
+public sealed class GeneralSettings
+{
+    public string DealerMode { get; set; } = "Venue bank";
+    public float ChatQueueDelaySeconds { get; set; } = 1.0f;
+    public int UndoLimit { get; set; } = 10;
+    public string ExportDirectory { get; set; } = string.Empty;
+    public bool AstrologianImmersionEnabled { get; set; } = false;
+    public bool AstrologianUseTargetCommand { get; set; } = true;
+}
+
+[Serializable]
+public sealed class OverlaySettings
+{
+    public bool Enabled { get; set; } = true;
+    public bool Compact { get; set; } = true;
+    public float TextScale { get; set; } = 1.0f;
+    public float VerticalOffset { get; set; } = 1.15f;
+    public Dictionary<string, float> PlayerHeightOffsets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public float MaxRenderDistance { get; set; } = 30f;
+    public float BackgroundOpacity { get; set; } = 0.55f;
+    public bool ShowOnlyTableMembers { get; set; } = true;
+    public bool UseDrawnOverhead { get; set; } = false;
+}
+
+[Serializable]
+public sealed class DeathRollSettings
+{
+    public int MaxPlayers { get; set; } = 32;
+    public float BracketZoom { get; set; } = 1.0f;
+    public bool BracketWindowOpen { get; set; } = false;
+    public string ChatChannel { get; set; } = "party";
+}
