@@ -75,6 +75,26 @@ public sealed class DeathRollTournamentTab
             }
 
             ImGui.TextDisabled($"Current command prefix: {GetChannelCommand(config.DeathRoll.ChatChannel)}");
+
+            var delay = config.DeathRoll.ChatBroadcastDelaySeconds;
+            ImGui.SetNextItemWidth(120f);
+            if (ImGui.InputFloat("DRT broadcast delay seconds", ref delay, 0.1f, 0.5f, "%.1f"))
+                config.DeathRoll.ChatBroadcastDelaySeconds = Math.Clamp(delay, 0.2f, 30f);
+            UiHelpers.Tooltip("Delay between automatic DRT chat messages. Default: 1.5 seconds.");
+
+            var announceNextTurn = config.DeathRoll.AnnounceNextTurnAfterRoll;
+            if (ImGui.Checkbox("Announce next roll after each valid turn", ref announceNextTurn))
+                config.DeathRoll.AnnounceNextTurnAfterRoll = announceNextTurn;
+            UiHelpers.Tooltip("Off by default. When off, DRT only announces the expected /random after a player rolls the wrong range.");
+
+            var zeroBehavior = NormalizeOpeningZeroRollBehavior(config.DeathRoll.OpeningZeroRollBehavior);
+            if (ImGui.BeginCombo("Opening 0 roll behavior", GetOpeningZeroRollBehaviorLabel(zeroBehavior)))
+            {
+                DrawOpeningZeroRollOption("eliminate", "Eliminate player and end round");
+                DrawOpeningZeroRollOption("skip", "Skip turn to other player");
+                ImGui.EndCombo();
+            }
+            UiHelpers.Tooltip("Controls what happens if the first active death-roll /random returns 0.");
         });
     }
 
@@ -86,6 +106,27 @@ public sealed class DeathRollTournamentTab
         if (selected)
             ImGui.SetItemDefaultFocus();
     }
+
+    private void DrawOpeningZeroRollOption(string value, string label)
+    {
+        var selected = string.Equals(NormalizeOpeningZeroRollBehavior(config.DeathRoll.OpeningZeroRollBehavior), value, StringComparison.OrdinalIgnoreCase);
+        if (ImGui.Selectable(label, selected))
+            config.DeathRoll.OpeningZeroRollBehavior = value;
+        if (selected)
+            ImGui.SetItemDefaultFocus();
+    }
+
+    private static string NormalizeOpeningZeroRollBehavior(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "skip" or "skip turn" or "skip_turn" => "skip",
+        _ => "eliminate",
+    };
+
+    private static string GetOpeningZeroRollBehaviorLabel(string value) => value switch
+    {
+        "skip" => "Skip turn to other player",
+        _ => "Eliminate player and end round",
+    };
 
     private static string NormalizeChannelLabel(string? value) => value?.Trim().ToLowerInvariant() switch
     {

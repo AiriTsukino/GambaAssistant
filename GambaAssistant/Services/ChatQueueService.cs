@@ -15,6 +15,7 @@ public sealed class ChatQueueService : IDisposable
     public string Status => Paused ? $"Paused ({Count} queued)" : Count == 0 ? "Idle" : $"Queued: {Count}";
     public bool DemoMode { get; set; }
     public float EffectiveDelaySeconds => Math.Max(0.2f, config.General.ChatQueueDelaySeconds);
+    public float DeathRollDelaySeconds => Math.Max(0.2f, config.DeathRoll.ChatBroadcastDelaySeconds);
     public ChatQueueService(Configuration config, LogService log)
     {
         this.config = config;
@@ -23,13 +24,13 @@ public sealed class ChatQueueService : IDisposable
         DalamudServices.Framework.Update += OnFrameworkUpdate;
     }
 
-    public void EnqueueParty(string message) => queue.Enqueue(new ChatQueueItem($"/p {message}", false));
+    public void EnqueueParty(string message) => queue.Enqueue(new ChatQueueItem($"/p {message}", false, EffectiveDelaySeconds));
     public void EnqueueDeathRoll(string message)
     {
         var channel = NormalizeChatChannel(config.DeathRoll.ChatChannel);
-        queue.Enqueue(new ChatQueueItem($"{channel} {message}", false));
+        queue.Enqueue(new ChatQueueItem($"{channel} {message}", false, DeathRollDelaySeconds));
     }
-    public void EnqueueCommand(string command, bool diceCommand = false) => queue.Enqueue(new ChatQueueItem(command, diceCommand));
+    public void EnqueueCommand(string command, bool diceCommand = false) => queue.Enqueue(new ChatQueueItem(command, diceCommand, EffectiveDelaySeconds));
 
     private static string NormalizeChatChannel(string? channel) => channel?.Trim().ToLowerInvariant() switch
     {
@@ -61,10 +62,10 @@ public sealed class ChatQueueService : IDisposable
                 log.Add(LogCategory.Warnings, $"Unable to send command automatically: {item.Command}");
             }
         }
-        nextSend = DateTimeOffset.Now.AddSeconds(EffectiveDelaySeconds);
+        nextSend = DateTimeOffset.Now.AddSeconds(Math.Max(0.2f, item.DelaySeconds));
     }
 
     public void Dispose() => DalamudServices.Framework.Update -= OnFrameworkUpdate;
 }
 
-public sealed record ChatQueueItem(string Command, bool IsDiceCommand);
+public sealed record ChatQueueItem(string Command, bool IsDiceCommand, float DelaySeconds);

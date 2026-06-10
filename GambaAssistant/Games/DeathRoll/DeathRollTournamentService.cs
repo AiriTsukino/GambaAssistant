@@ -269,6 +269,12 @@ public sealed class DeathRollTournamentService : IDisposable
 
     private void EnqueueDrtChat(string message) => chat.EnqueueDeathRoll(message);
 
+    private string GetExpectedRollCommand(DeathRollMatch match)
+        => !match.FirstDeathRollTaken && match.CurrentMax == Tournament.StartingMax ? "/random" : $"/random {match.CurrentMax}";
+
+    private void AnnounceWrongRollRange(DeathRollMatch match, DeathRollPlayer player)
+        => EnqueueDrtChat($"DRT {match.Label}: {player.DisplayName}, use {GetExpectedRollCommand(match)}.");
+
     public bool TryHandleRandomRoll(string playerName, int value, int? maxFromLine = null)
     {
         var match = Tournament.ActiveMatch;
@@ -342,17 +348,39 @@ public sealed class DeathRollTournamentService : IDisposable
             if (!isOpeningDeathRoll)
             {
                 log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}; could not verify they used /random {match.CurrentMax}.");
+                AnnounceWrongRollRange(match, player);
                 return true;
             }
         }
         else if (isOpeningDeathRoll && maxFromLine.Value == Tournament.SeedingMax)
         {
             log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}/{maxFromLine.Value}; that is a seed-roll range, not the opening /random death roll.");
+            AnnounceWrongRollRange(match, player);
             return true;
         }
         else if (maxFromLine.Value != match.CurrentMax)
         {
             log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}/{maxFromLine.Value}; expected {(isOpeningDeathRoll ? "/random or /random " : "/random ")}{match.CurrentMax}.");
+            AnnounceWrongRollRange(match, player);
+            return true;
+        }
+
+        if (value == 0 && isOpeningDeathRoll)
+        {
+            var otherPlayer = match.OtherPlayer(player);
+            var behavior = NormalizeOpeningZeroRollBehavior(config.DeathRoll.OpeningZeroRollBehavior);
+            if (behavior == "skip" && otherPlayer is not null)
+            {
+                match.CurrentTurn = otherPlayer;
+                match.History.Add($"{player.DisplayName} rolled 0 on the opening death roll; turn skipped to {otherPlayer.DisplayName}.");
+                log.Add(LogCategory.Info, $"DRT {match.Label}: {player.DisplayName} rolled 0 on the opening death roll; skipping to {otherPlayer.DisplayName}.");
+                EnqueueDrtChat($"DRT {match.Label}: {player.DisplayName} rolled 0. {otherPlayer.DisplayName}, roll /random.");
+                if (chat.DemoMode)
+                    QueueDemoRoll(otherPlayer.DisplayName, match.CurrentMax);
+                return true;
+            }
+
+            CompleteMatch(match, otherPlayer, player, "rolled 0 on the opening death roll");
             return true;
         }
 
@@ -373,7 +401,10 @@ public sealed class DeathRollTournamentService : IDisposable
 
         match.CurrentMax = value;
         match.CurrentTurn = match.OtherPlayer(player);
-        PromptCurrentTurn(match);
+        if (config.DeathRoll.AnnounceNextTurnAfterRoll)
+            PromptCurrentTurn(match);
+        else if (chat.DemoMode && match.CurrentTurn is not null)
+            QueueDemoRoll(match.CurrentTurn.DisplayName, match.CurrentMax);
         return true;
     }
 
@@ -407,7 +438,7 @@ public sealed class DeathRollTournamentService : IDisposable
             QueueDemoRoll(match.CurrentTurn.DisplayName, match.CurrentMax);
     }
 
-    private void CompleteMatch(DeathRollMatch match, DeathRollPlayer? winner, DeathRollPlayer loser)
+    private void CompleteMatch(DeathRollMatch match, DeathRollPlayer? winner, DeathRollPlayer loser, string eliminationReason = "rolled 1")
     {
         if (winner is null) return;
         match.Winner = winner;
@@ -415,8 +446,8 @@ public sealed class DeathRollTournamentService : IDisposable
         match.Status = DeathRollMatchStatus.Complete;
         match.CurrentTurn = null;
         loser.Eliminated = true;
-        match.History.Add($"{loser.DisplayName} rolled 1 and is eliminated. {winner.DisplayName} advances.");
-        EnqueueDrtChat($"DRT {match.Label}: {loser.DisplayName} rolled 1 and is eliminated. {winner.DisplayName} advances.");
+        match.History.Add($"{loser.DisplayName} {eliminationReason} and is eliminated. {winner.DisplayName} advances.");
+        EnqueueDrtChat($"DRT {match.Label}: {loser.DisplayName} {eliminationReason} and is eliminated. {winner.DisplayName} advances.");
         log.Add(LogCategory.Info, $"DRT {match.Label} complete. Winner: {winner.DisplayName}.");
         AdvanceBracketIfReady();
     }
@@ -566,14 +597,14 @@ public sealed class DeathRollTournamentService : IDisposable
         var value = Random.Shared.Next(1, Math.Max(2, max + 1));
         log.Add(LogCategory.Demo, $"Demo DRT random: {player} rolls {value}/{max}.");
         TryHandleRandomRoll(player, value, max);
-        nextDemoRollTime = ImGuiNETShim.TimeNow() + chat.EffectiveDelaySeconds;
+        nextDemoRollTime = ImGuiNETShim.TimeNow() + chat.DeathRollDelaySeconds;
     }
 
     private void QueueDemoRoll(string player, int max)
     {
         demoRolls.Enqueue((player, max));
         if (nextDemoRollTime <= 0)
-            nextDemoRollTime = ImGuiNETShim.TimeNow() + chat.EffectiveDelaySeconds;
+            nextDemoRollTime = ImGuiNETShim.TimeNow() + chat.DeathRollDelaySeconds;
     }
 
     private static bool LooksLikeRandom(string text)
@@ -661,13 +692,13 @@ public sealed class DeathRollTournamentService : IDisposable
         //   Random! <Player> rolls 7 (out of 10.)
         // Once the "out of N" range is removed, take the number after roll/rolls first.
         var rollWordMatch = Regex.Match(withoutRange, @"(?i)\b(?:you\s+)?rolls?\s+(?:a\s+|an\s+)?(?<value>\d{1,6})\b");
-        if (rollWordMatch.Success && int.TryParse(rollWordMatch.Groups["value"].Value, out value) && value > 0)
+        if (rollWordMatch.Success && int.TryParse(rollWordMatch.Groups["value"].Value, out value) && value >= 0)
             return true;
 
         var numbers = Regex.Matches(withoutRange, @"(?<![A-Za-z0-9])\d{1,6}(?![A-Za-z0-9])");
         for (var i = numbers.Count - 1; i >= 0; i--)
         {
-            if (int.TryParse(numbers[i].Value, out value) && value > 0)
+            if (int.TryParse(numbers[i].Value, out value) && value >= 0)
                 return true;
         }
 
@@ -951,6 +982,12 @@ public sealed class DeathRollTournamentService : IDisposable
         var chars = value.Where(c => !char.IsControl(c) && (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || c is '\'' or '-' or ',' or '.' or '@' or '(' or ')')).ToArray();
         return Regex.Replace(new string(chars), @"\s+", " ").Trim().Trim('.', ' ');
     }
+
+    private static string NormalizeOpeningZeroRollBehavior(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "skip" or "skip turn" or "skip_turn" => "skip",
+        _ => "eliminate",
+    };
 
     private static bool SameIdentity(PlayerIdentity a, PlayerIdentity b)
     {

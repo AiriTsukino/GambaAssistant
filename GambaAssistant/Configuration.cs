@@ -48,4 +48,7 @@ public sealed class DeathRollSettings
     public float BracketZoom { get; set; } = 1.0f;
     public bool BracketWindowOpen { get; set; } = false;
     public string ChatChannel { get; set; } = "party";
+    public float ChatBroadcastDelaySeconds { get; set; } = 1.5f;
+    public bool AnnounceNextTurnAfterRoll { get; set; } = false;
+    public string OpeningZeroRollBehavior { get; set; } = "eliminate";
 }
