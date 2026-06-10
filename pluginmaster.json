@@ -1,6 +1,6 @@
 [
     {
-        "Author": "GambaAssistant",
+        "Author": "Airi Tsukino",
         "Name": "GambaAssistant",
         "InternalName": "GambaAssistant",
         "AssemblyVersion": "0.1.78.0",
@@ -11,6 +11,7 @@
         "DalamudApiLevel": 15,
         "IsHide": false,
         "IsTestingExclusive": false,
+        "IconUrl": "https://raw.githubusercontent.com/AiriTsukino/GambaAssistant/main/GambaAssistant/Resources/GALogo.png",
         "DownloadLinkInstall": "https://raw.githubusercontent.com/AiriTsukino/GambaAssistant/main/GambaAssistant.zip",
         "DownloadLinkUpdate": "https://raw.githubusercontent.com/AiriTsukino/GambaAssistant/main/GambaAssistant.zip",
         "LastUpdate": 1781066728
