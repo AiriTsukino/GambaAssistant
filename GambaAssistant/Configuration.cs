@@ -49,6 +49,9 @@ public sealed class DeathRollSettings
     public bool BracketWindowOpen { get; set; } = false;
     public string ChatChannel { get; set; } = "party";
     public float ChatBroadcastDelaySeconds { get; set; } = 1.5f;
+    public bool DisableChatBroadcasts { get; set; } = false;
     public bool AnnounceNextTurnAfterRoll { get; set; } = false;
+    public bool RequireDiceRollsInPartyChat { get; set; } = true;
+    public bool JoinBroadcastActive { get; set; } = false;
     public string OpeningZeroRollBehavior { get; set; } = "eliminate";
 }

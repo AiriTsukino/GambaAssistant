@@ -44,7 +44,7 @@ public sealed class DeathRollMatch
     public bool FirstDeathRollTaken { get; set; }
     public DateTime OpeningRollsAcceptedAfterUtc { get; set; } = DateTime.MinValue;
     public List<string> History { get; set; } = new();
-    public string Label => $"R{RoundIndex + 1} Match {MatchIndex + 1}";
+    public string Label => DeathRollTournamentLabels.GetMatchLabel(RoundIndex, MatchIndex, 0);
 
     public bool HasPlayer(string displayName)
         => IsPlayer(PlayerA, displayName) || IsPlayer(PlayerB, displayName);
@@ -74,6 +74,30 @@ public sealed class DeathRollMatch
 
     private static string Normalize(string value)
         => new string(value.Where(c => char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || c == '@').ToArray()).Trim().ToLowerInvariant();
+}
+
+public static class DeathRollTournamentLabels
+{
+    public static string GetStageName(int roundIndex, int totalRounds, bool plural = false)
+    {
+        if (totalRounds <= 0)
+            return $"Round {roundIndex + 1}";
+
+        var roundsRemaining = totalRounds - roundIndex;
+        return roundsRemaining switch
+        {
+            <= 1 => plural ? "Final" : "Final",
+            2 => plural ? "Semi-finals" : "Semi-final",
+            3 => plural ? "Quarter-finals" : "Quarter-final",
+            _ => $"Round of {(int)Math.Pow(2, roundsRemaining)}",
+        };
+    }
+
+    public static string GetMatchLabel(int roundIndex, int matchIndex, int totalRounds)
+    {
+        var stage = GetStageName(roundIndex, totalRounds);
+        return stage == "Final" ? "Final Match" : $"{stage} Match {matchIndex + 1}";
+    }
 }
 
 [Serializable]

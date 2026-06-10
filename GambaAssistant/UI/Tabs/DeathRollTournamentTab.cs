@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Text;
 using Dalamud.Bindings.ImGui;
 using GambaAssistant.Games.DeathRoll;
 using GambaAssistant.Models.Players;
@@ -57,12 +58,59 @@ public sealed class DeathRollTournamentTab
         DrawBracket();
     }
 
+    public void DrawLogTab()
+    {
+        UiHelpers.Card("DRT Log", () =>
+        {
+            var drtEntries = log.Entries
+                .Where(e => IsDrtLogEntry(e))
+                .TakeLast(300)
+                .ToList();
+            var broadcastText = BuildLogText(drtEntries);
+            var historyText = BuildTournamentHistoryText();
+
+            if (ImGui.Button("Copy DRT Log"))
+                ImGui.SetClipboardText(broadcastText);
+            ImGui.SameLine();
+            if (ImGui.Button("Copy Tournament History"))
+                ImGui.SetClipboardText(historyText);
+            ImGui.SameLine();
+            ImGui.TextDisabled($"Showing latest {drtEntries.Count} DRT log entries.");
+
+            DrawDisabledWrapped("This tab keeps DRT broadcasts, suppressed broadcast attempts, join activity, warnings, and match history in one spot. If chat broadcasts are disabled, attempted DRT broadcasts still appear here internally.");
+
+            ImGui.Separator();
+            ImGui.TextColored(GambaTheme.Gold, "Broadcast / System Log");
+            if (string.IsNullOrWhiteSpace(broadcastText))
+            {
+                ImGui.TextDisabled("No DRT log entries yet.");
+            }
+            else
+            {
+                var logHeight = Math.Max(180f, ImGui.GetContentRegionAvail().Y * 0.48f);
+                ImGui.InputTextMultiline("##drt-broadcast-log", ref broadcastText, Math.Max(broadcastText.Length + 1024, 4096), new Vector2(-1, logHeight), ImGuiInputTextFlags.ReadOnly | ImGuiInputTextFlags.AllowTabInput);
+            }
+
+            ImGui.Separator();
+            ImGui.TextColored(GambaTheme.Gold, "Tournament Match History");
+            if (string.IsNullOrWhiteSpace(historyText))
+            {
+                ImGui.TextDisabled("No match history yet.");
+            }
+            else
+            {
+                var historyHeight = Math.Max(160f, ImGui.GetContentRegionAvail().Y - 20f);
+                ImGui.InputTextMultiline("##drt-match-history-log", ref historyText, Math.Max(historyText.Length + 1024, 4096), new Vector2(-1, historyHeight), ImGuiInputTextFlags.ReadOnly | ImGuiInputTextFlags.AllowTabInput);
+            }
+        });
+    }
+
     public void DrawSettingsTab()
     {
         UiHelpers.Card("DRT Settings", () =>
         {
             ImGui.TextColored(GambaTheme.Gold, "Chat Output");
-            DrawDisabledWrapped("Choose where automatic DRT prompts and winner messages are sent. Use Say/Shout/Yell for tournaments larger than one party.");
+            DrawDisabledWrapped("Choose where automatic DRT prompts and winner messages are sent. You can disable all DRT broadcasts below for silent/background operation.");
 
             var current = NormalizeChannelLabel(config.DeathRoll.ChatChannel);
             if (ImGui.BeginCombo("Auto DRT chat channel", current))
@@ -76,6 +124,11 @@ public sealed class DeathRollTournamentTab
 
             ImGui.TextDisabled($"Current command prefix: {GetChannelCommand(config.DeathRoll.ChatChannel)}");
 
+            var disableBroadcasts = config.DeathRoll.DisableChatBroadcasts;
+            if (ImGui.Checkbox("Disable all DRT chat broadcasts", ref disableBroadcasts))
+                config.DeathRoll.DisableChatBroadcasts = disableBroadcasts;
+            UiHelpers.Tooltip("When enabled, DRT still tracks joins, rolls, brackets, winners, and match state, but sends no automatic chat messages at all.");
+
             var delay = config.DeathRoll.ChatBroadcastDelaySeconds;
             ImGui.SetNextItemWidth(120f);
             if (ImGui.InputFloat("DRT broadcast delay seconds", ref delay, 0.1f, 0.5f, "%.1f"))
@@ -85,7 +138,12 @@ public sealed class DeathRollTournamentTab
             var announceNextTurn = config.DeathRoll.AnnounceNextTurnAfterRoll;
             if (ImGui.Checkbox("Announce next roll after each valid turn", ref announceNextTurn))
                 config.DeathRoll.AnnounceNextTurnAfterRoll = announceNextTurn;
-            UiHelpers.Tooltip("Off by default. When off, DRT only announces the expected /random after a player rolls the wrong range.");
+            UiHelpers.Tooltip("Off by default. When off, DRT only announces the expected roll command after a player rolls the wrong range.");
+
+            var requireDiceParty = config.DeathRoll.RequireDiceRollsInPartyChat;
+            if (ImGui.Checkbox("Require /dice rolls when DRT chat is party", ref requireDiceParty))
+                config.DeathRoll.RequireDiceRollsInPartyChat = requireDiceParty;
+            UiHelpers.Tooltip("On by default. When DRT output is set to /party, /random rolls are ignored and the player is warned to use /dice instead.");
 
             var zeroBehavior = NormalizeOpeningZeroRollBehavior(config.DeathRoll.OpeningZeroRollBehavior);
             if (ImGui.BeginCombo("Opening 0 roll behavior", GetOpeningZeroRollBehaviorLabel(zeroBehavior)))
@@ -94,8 +152,44 @@ public sealed class DeathRollTournamentTab
                 DrawOpeningZeroRollOption("skip", "Skip turn to other player");
                 ImGui.EndCombo();
             }
-            UiHelpers.Tooltip("Controls what happens if the first active death-roll /random returns 0.");
+            UiHelpers.Tooltip("Controls what happens if the first active death-roll command returns 0.");
         });
+    }
+
+    private static bool IsDrtLogEntry(LogEntry entry)
+    {
+        if (entry.Category == LogCategory.ChatQueue && entry.Message.Contains("DRT", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return entry.Message.StartsWith("DRT", StringComparison.OrdinalIgnoreCase)
+            || entry.Message.StartsWith("!join", StringComparison.OrdinalIgnoreCase)
+            || entry.Message.Contains("DRT !join", StringComparison.OrdinalIgnoreCase)
+            || entry.Message.Contains("death roll", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string BuildTournamentHistoryText()
+    {
+        var sb = new StringBuilder();
+        foreach (var match in drt.Tournament.AllMatches.OrderBy(m => m.RoundIndex).ThenBy(m => m.MatchIndex))
+        {
+            if (match.History.Count == 0)
+                continue;
+
+            sb.AppendLine(drt.GetMatchLabel(match));
+            foreach (var line in match.History)
+                sb.Append("  - ").AppendLine(line);
+            sb.AppendLine();
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private static string BuildLogText(IEnumerable<LogEntry> entries)
+    {
+        var sb = new StringBuilder();
+        foreach (var entry in entries)
+            sb.Append('[').Append(entry.Timestamp.ToString("T")).Append("] [").Append(entry.Category).Append("] ").AppendLine(entry.Message);
+        return sb.ToString().TrimEnd();
     }
 
     private void DrawChannelOption(string value, string label)
@@ -139,6 +233,12 @@ public sealed class DeathRollTournamentTab
 
     private static string GetChannelCommand(string? value) => NormalizeChannelLabel(value);
 
+    private string GetRollCommandLabel(int? max = null)
+    {
+        var command = NormalizeChannelLabel(config.DeathRoll.ChatChannel) == "/party" ? "/dice" : "/random";
+        return max.HasValue ? $"{command} {max.Value}" : command;
+    }
+
     private static void DrawDisabledWrapped(string text)
     {
         ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + Math.Max(180f, ImGui.GetContentRegionAvail().X));
@@ -160,7 +260,7 @@ public sealed class DeathRollTournamentTab
             UiHelpers.Tooltip("Maximum tournament size. Even numbers only, up to 64.");
 
             ImGui.TextDisabled($"Status: {drt.Tournament.Status} | Entrants: {drt.Tournament.Entrants.Count}/{config.DeathRoll.MaxPlayers}");
-            DrawDisabledWrapped("Death Roll starts each match with both players rolling /random 10. Higher seed roll goes first, then the first active roll uses plain /random before later turns shrink the max until someone rolls 1.");
+            DrawDisabledWrapped($"Death Roll starts each match with both players rolling {GetRollCommandLabel(drt.Tournament.SeedingMax)}. Higher seed roll goes first, then the first active roll uses plain {GetRollCommandLabel()} before later turns shrink the max until someone rolls 1.");
             ImGui.Separator();
 
             var setup = drt.Tournament.Status == DeathRollTournamentStatus.Setup;
@@ -185,6 +285,15 @@ public sealed class DeathRollTournamentTab
             }
             UiHelpers.Tooltip("Adds your own Name@World to the tournament roster.");
 
+            if (ImGui.Button("Broadcast !join"))
+                drt.BroadcastJoinPrompt();
+            UiHelpers.Tooltip("Broadcasts: Type !join in chat to join the DRT Tournament. While active, party DRT listens to party chat; other DRT channels listen to say, yell, and shout.");
+            ImGui.SameLine();
+            if (ImGui.Button("Stop !join"))
+                drt.StopJoinBroadcast();
+            ImGui.SameLine();
+            ImGui.TextDisabled(config.DeathRoll.JoinBroadcastActive ? "!join active" : "!join inactive");
+
             ImGui.SetNextItemWidth(180f);
             ImGui.InputText("Name##drt-manual-name", ref manualName, 64);
             ImGui.SameLine();
@@ -201,6 +310,7 @@ public sealed class DeathRollTournamentTab
                 else
                     log.Add(LogCategory.Warnings, reason);
             }
+
             if (!setup) ImGui.EndDisabled();
 
             DrawEntrants(setup);
@@ -262,26 +372,19 @@ public sealed class DeathRollTournamentTab
                 return;
             }
 
-            ImGui.TextColored(GambaTheme.Gold, $"{active.Label}: {active.PlayerA?.DisplayName ?? "TBD"} vs {active.PlayerB?.DisplayName ?? "TBD"}");
+            ImGui.TextColored(GambaTheme.Gold, $"{drt.GetMatchLabel(active)}: {active.PlayerA?.DisplayName ?? "TBD"} vs {active.PlayerB?.DisplayName ?? "TBD"}");
             ImGui.Text($"Status: {active.Status}");
             ImGui.Text($"Current max: {active.CurrentMax}");
             ImGui.Text($"Current turn: {active.CurrentTurn?.DisplayName ?? "Not set"}");
             if (active.Status == DeathRollMatchStatus.SeedingRolls)
                 ImGui.TextDisabled($"Seed rolls: {active.PlayerA?.DisplayName}={active.SeedRollA?.ToString() ?? "-"}, {active.PlayerB?.DisplayName}={active.SeedRollB?.ToString() ?? "-"}");
 
-            if (active.Status == DeathRollMatchStatus.Waiting && ImGui.Button("Prompt /random 10 Seeding"))
+            if (active.Status == DeathRollMatchStatus.Waiting && ImGui.Button($"Prompt {GetRollCommandLabel(drt.Tournament.SeedingMax)} Seeding"))
                 drt.PromptSeedingRolls(active);
-            if (active.Status == DeathRollMatchStatus.SeedingRolls && ImGui.Button("Re-prompt /random 10"))
+            if (active.Status == DeathRollMatchStatus.SeedingRolls && ImGui.Button($"Re-prompt {GetRollCommandLabel(drt.Tournament.SeedingMax)}"))
                 drt.PromptSeedingRolls(active);
-            if (active.Status == DeathRollMatchStatus.Playing && ImGui.Button(active.FirstDeathRollTaken ? "Prompt Current Roll" : "Prompt Opening /random"))
+            if (active.Status == DeathRollMatchStatus.Playing && ImGui.Button(active.FirstDeathRollTaken ? "Prompt Current Roll" : $"Prompt Opening {GetRollCommandLabel()}"))
                 drt.PromptCurrentTurn(active);
-
-            ImGui.Separator();
-            ImGui.TextColored(GambaTheme.Gold, "Match Log");
-            ImGui.BeginChild("##drt-match-log", new Vector2(0, 110f), true);
-            foreach (var line in active.History.TakeLast(30))
-                ImGui.TextWrapped(line);
-            ImGui.EndChild();
         });
     }
 
@@ -410,7 +513,7 @@ public sealed class DeathRollTournamentTab
         var groupSize = MathF.Pow(2f, roundIndex);
         var spacing = rowStride * groupSize;
         var yOffset = 44f * scale + ((groupSize - 1f) * rowStride) / 2f;
-        var title = leftSide ? $"Left R{roundIndex + 1}" : $"Right R{roundIndex + 1}";
+        var title = leftSide ? $"Left {drt.GetStageName(roundIndex, true)}" : $"Right {drt.GetStageName(roundIndex, true)}";
 
         ImGui.GetWindowDrawList().AddText(new Vector2(x, originY + 6f * scale), ImGui.GetColorU32(GambaTheme.Gold), title);
         for (var i = 0; i < sideMatches.Count; i++)
@@ -495,7 +598,7 @@ public sealed class DeathRollTournamentTab
         var maxChars = Math.Clamp((int)((size.X - pad * 2f) / Math.Max(3.8f, 7.2f * scale)), 4, 34);
         var line = Math.Max(9f, 18f * scale);
 
-        draw.AddText(new Vector2(textX, textY), ImGui.GetColorU32(GambaTheme.Gold), TrimName(match.Label, maxChars));
+        draw.AddText(new Vector2(textX, textY), ImGui.GetColorU32(GambaTheme.Gold), TrimName(drt.GetMatchLabel(match), maxChars));
         draw.AddText(new Vector2(textX, textY + line), ImGui.GetColorU32(GambaTheme.Text), TrimName(match.PlayerA?.DisplayName ?? "TBD", maxChars));
         draw.AddText(new Vector2(textX, textY + line * 2f), ImGui.GetColorU32(GambaTheme.Text), TrimName(match.PlayerB?.DisplayName ?? "TBD", maxChars));
 

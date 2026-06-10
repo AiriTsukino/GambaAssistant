@@ -27,10 +27,26 @@ public sealed class ChatQueueService : IDisposable
     public void EnqueueParty(string message) => queue.Enqueue(new ChatQueueItem($"/p {message}", false, EffectiveDelaySeconds));
     public void EnqueueDeathRoll(string message)
     {
+        if (config.DeathRoll.DisableChatBroadcasts)
+        {
+            log.Add(LogCategory.ChatQueue, $"DRT broadcast suppressed: {message}");
+            return;
+        }
+
         var channel = NormalizeChatChannel(config.DeathRoll.ChatChannel);
         queue.Enqueue(new ChatQueueItem($"{channel} {message}", false, DeathRollDelaySeconds));
     }
     public void EnqueueCommand(string command, bool diceCommand = false) => queue.Enqueue(new ChatQueueItem(command, diceCommand, EffectiveDelaySeconds));
+    public void EnqueueDeathRollCommand(string command, bool diceCommand = false)
+    {
+        if (config.DeathRoll.DisableChatBroadcasts)
+        {
+            log.Add(LogCategory.ChatQueue, $"DRT command suppressed: {command}");
+            return;
+        }
+
+        queue.Enqueue(new ChatQueueItem(command, diceCommand, DeathRollDelaySeconds));
+    }
 
     private static string NormalizeChatChannel(string? channel) => channel?.Trim().ToLowerInvariant() switch
     {

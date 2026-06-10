@@ -102,7 +102,8 @@ public sealed class MainWindow : Window
         {
             case 0: deathRoll.Draw(); break;
             case 1: deathRoll.DrawBracketTab(); break;
-            case 2: deathRoll.DrawSettingsTab(); break;
+            case 2: deathRoll.DrawLogTab(); break;
+            case 3: deathRoll.DrawSettingsTab(); break;
         }
     }
 
@@ -143,7 +144,8 @@ public sealed class MainWindow : Window
             ImGui.TextColored(GambaTheme.Gold, "DRT Tabs");
             DrawDrtSubNavItem(0, "Tournament");
             DrawDrtSubNavItem(1, "Bracket");
-            DrawDrtSubNavItem(2, "Settings");
+            DrawDrtSubNavItem(2, "Log");
+            DrawDrtSubNavItem(3, "Settings");
         }
     }
 
@@ -176,7 +178,8 @@ public sealed class MainWindow : Window
     {
         0 => "Tournament",
         1 => "Bracket",
-        2 => "Settings",
+        2 => "Log",
+        3 => "Settings",
         _ => "Tournament",
     };
 

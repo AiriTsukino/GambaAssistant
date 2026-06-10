@@ -13,7 +13,7 @@ public sealed class DeathRollTournamentService : IDisposable
     private readonly ChatQueueService chat;
     private readonly LogService log;
     private static readonly Regex RandomRangeRegex = new(@"\(\s*1\s*-\s*(?<max>\d{1,6})\s*\)|\b1\s*-\s*(?<max2>\d{1,6})\b|\(?\s*out\s+of\s+(?<max3>\d{1,6})\.?(?:\s*\))?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex NameBeforeRandomRegex = new(@"(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:rolls?|rolled|random)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex NameBeforeRandomRegex = new(@"(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:rolls?|rolled|random|dice)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private double nextDemoRollTime;
     private readonly Queue<(string Player, int Max)> demoRolls = new();
 
@@ -213,9 +213,10 @@ public sealed class DeathRollTournamentService : IDisposable
         }
 
         Tournament.Status = DeathRollTournamentStatus.Running;
+        config.DeathRoll.JoinBroadcastActive = false;
         Tournament.ActiveMatchId = firstRound.First().Id;
         log.Add(LogCategory.Info, $"DRT started with {entrants.Count} entrants and {Tournament.Rounds.Count} generated bracket round(s).");
-        EnqueueDrtChat($"Death Roll Tournament started with {entrants.Count} players. Active match: {firstRound.First().PlayerA?.DisplayName} vs {firstRound.First().PlayerB?.DisplayName}.");
+        EnqueueDrtChat($"Death Roll Tournament started with {entrants.Count} players. Starting {MatchLabel(firstRound.First())}: {firstRound.First().PlayerA?.DisplayName} vs {firstRound.First().PlayerB?.DisplayName}.");
         PromptSeedingRolls(firstRound.First());
         return true;
     }
@@ -223,6 +224,7 @@ public sealed class DeathRollTournamentService : IDisposable
     public void ResetTournament()
     {
         Tournament.Status = DeathRollTournamentStatus.Setup;
+        config.DeathRoll.JoinBroadcastActive = false;
         Tournament.Rounds.Clear();
         Tournament.ActiveMatchId = null;
         foreach (var entrant in Tournament.Entrants)
@@ -235,45 +237,104 @@ public sealed class DeathRollTournamentService : IDisposable
     {
         if (Tournament.Status != DeathRollTournamentStatus.Setup) return;
         Tournament.Entrants.Clear();
+        config.DeathRoll.JoinBroadcastActive = false;
     }
+
+    public void BroadcastJoinPrompt()
+    {
+        if (Tournament.Status != DeathRollTournamentStatus.Setup)
+        {
+            log.Add(LogCategory.Warnings, "!join broadcast can only be enabled during DRT setup.");
+            return;
+        }
+
+        config.DeathRoll.JoinBroadcastActive = true;
+        EnqueueDrtChat("Type !join in chat to join the DRT Tournament");
+        log.Add(LogCategory.Info, "DRT !join listener enabled and broadcast queued.");
+    }
+
+    public void StopJoinBroadcast()
+    {
+        config.DeathRoll.JoinBroadcastActive = false;
+        log.Add(LogCategory.Info, "DRT !join listener disabled.");
+    }
+
+    public string GetMatchLabel(DeathRollMatch match)
+        => DeathRollTournamentLabels.GetMatchLabel(match.RoundIndex, match.MatchIndex, Tournament.Rounds.Count);
+
+    public string GetStageName(int roundIndex, bool plural = false)
+        => DeathRollTournamentLabels.GetStageName(roundIndex, Tournament.Rounds.Count, plural);
+
+    private string MatchLabel(DeathRollMatch match) => GetMatchLabel(match);
 
     public void SetActiveMatch(DeathRollMatch match)
     {
         Tournament.ActiveMatchId = match.Id;
-        log.Add(LogCategory.Info, $"DRT active match set to {match.Label}: {match.PlayerA?.DisplayName} vs {match.PlayerB?.DisplayName}.");
+        log.Add(LogCategory.Info, $"DRT active match set to {MatchLabel(match)}: {match.PlayerA?.DisplayName} vs {match.PlayerB?.DisplayName}.");
     }
 
     public void PromptSeedingRolls(DeathRollMatch match)
     {
         if (match.PlayerA is null || match.PlayerB is null || match.Status == DeathRollMatchStatus.Complete) return;
         match.Status = DeathRollMatchStatus.SeedingRolls;
-        EnqueueDrtChat($"DRT {match.Label}: {match.PlayerA.DisplayName} vs {match.PlayerB.DisplayName}. Both players roll /random {Tournament.SeedingMax}. Higher roll goes first.");
-        if (chat.DemoMode)
-        {
-            QueueDemoRoll(match.PlayerA.DisplayName, Tournament.SeedingMax);
-            QueueDemoRoll(match.PlayerB.DisplayName, Tournament.SeedingMax);
-        }
+        EnqueueDrtChat($"DRT {MatchLabel(match)}: {match.PlayerA.DisplayName} vs {match.PlayerB.DisplayName}. Both players roll {GetSeedRollCommand()}. Higher roll goes first.");
+        QueueAutomaticSeedRollIfNeeded(match, match.PlayerA);
+        QueueAutomaticSeedRollIfNeeded(match, match.PlayerB);
     }
 
     public void PromptCurrentTurn(DeathRollMatch match)
     {
         if (match.Status != DeathRollMatchStatus.Playing || match.CurrentTurn is null) return;
         if (!match.FirstDeathRollTaken && match.CurrentMax == Tournament.StartingMax)
-            EnqueueDrtChat($"DRT {match.Label}: {match.CurrentTurn.DisplayName}, roll /random.");
+            EnqueueDrtChat($"DRT {MatchLabel(match)}: {match.CurrentTurn.DisplayName}, roll {GetRollCommand()}.");
         else
-            EnqueueDrtChat($"DRT {match.Label}: {match.CurrentTurn.DisplayName}, roll /random {match.CurrentMax}.");
+            EnqueueDrtChat($"DRT {MatchLabel(match)}: {match.CurrentTurn.DisplayName}, roll {GetRollCommand(match.CurrentMax)}.");
 
-        if (chat.DemoMode)
-            QueueDemoRoll(match.CurrentTurn.DisplayName, match.CurrentMax);
+        QueueAutomaticRollIfNeeded(match.CurrentTurn, match.CurrentMax);
     }
 
-    private void EnqueueDrtChat(string message) => chat.EnqueueDeathRoll(message);
+    private void EnqueueDrtChat(string message)
+    {
+        if (config.DeathRoll.DisableChatBroadcasts)
+        {
+            log.Add(LogCategory.ChatQueue, $"DRT broadcast suppressed: {message}");
+            return;
+        }
+
+        log.Add(LogCategory.ChatQueue, $"DRT broadcast queued ({NormalizeDeathRollChatChannel(config.DeathRoll.ChatChannel)}): {message}");
+        chat.EnqueueDeathRoll(message);
+    }
+
+    private bool UseDiceCommandWording() => NormalizeDeathRollChatChannel(config.DeathRoll.ChatChannel) == "/party";
+
+    private bool RequireDiceRollsInPartyChat()
+        => UseDiceCommandWording() && config.DeathRoll.RequireDiceRollsInPartyChat;
+
+    private string GetRollCommand(int? max = null)
+    {
+        var command = UseDiceCommandWording() ? "/dice" : "/random";
+        return max.HasValue ? $"{command} {max.Value}" : command;
+    }
 
     private string GetExpectedRollCommand(DeathRollMatch match)
-        => !match.FirstDeathRollTaken && match.CurrentMax == Tournament.StartingMax ? "/random" : $"/random {match.CurrentMax}";
+        => !match.FirstDeathRollTaken && match.CurrentMax == Tournament.StartingMax ? GetRollCommand() : GetRollCommand(match.CurrentMax);
+
+    private string GetSeedRollCommand() => GetRollCommand(Tournament.SeedingMax);
 
     private void AnnounceWrongRollRange(DeathRollMatch match, DeathRollPlayer player)
-        => EnqueueDrtChat($"DRT {match.Label}: {player.DisplayName}, use {GetExpectedRollCommand(match)}.");
+        => EnqueueDrtChat($"DRT {MatchLabel(match)}: {player.DisplayName}, use {GetExpectedRollCommand(match)}.");
+
+    private void AnnounceWrongSeedRollRange(DeathRollMatch match, DeathRollPlayer player)
+        => EnqueueDrtChat($"DRT {MatchLabel(match)}: {player.DisplayName}, use {GetSeedRollCommand()} for your seed roll.");
+
+    private static string NormalizeDeathRollChatChannel(string? channel) => channel?.Trim().ToLowerInvariant() switch
+    {
+        "/say" or "say" or "/s" or "s" => "/say",
+        "/shout" or "shout" or "/sh" or "sh" => "/shout",
+        "/yell" or "yell" or "/y" or "y" => "/yell",
+        "/party" or "party" or "/p" or "p" => "/party",
+        _ => "/party",
+    };
 
     public bool TryHandleRandomRoll(string playerName, int value, int? maxFromLine = null)
     {
@@ -289,13 +350,15 @@ public sealed class DeathRollTournamentService : IDisposable
         {
             if (!maxFromLine.HasValue)
             {
-                log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s seed roll {value}; could not verify they used /random {Tournament.SeedingMax}.");
+                log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s seed roll {value}; could not verify they used {GetSeedRollCommand()}.");
+                AnnounceWrongSeedRollRange(match, player);
                 return true;
             }
 
             if (maxFromLine.Value != Tournament.SeedingMax)
             {
-                log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s seed roll {value}/{maxFromLine.Value}; expected /random {Tournament.SeedingMax}.");
+                log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s seed roll {value}/{maxFromLine.Value}; expected {GetSeedRollCommand()}.");
+                AnnounceWrongSeedRollRange(match, player);
                 return true;
             }
 
@@ -319,7 +382,7 @@ public sealed class DeathRollTournamentService : IDisposable
 
             match.Status = DeathRollMatchStatus.SeedingRolls;
             match.History.Add($"{player.DisplayName} seed rolled {value}/{Tournament.SeedingMax}. Locked in.");
-            log.Add(LogCategory.Info, $"DRT {match.Label}: {player.DisplayName} seed rolled {value}; locked in.");
+            log.Add(LogCategory.Info, $"DRT {MatchLabel(match)}: {player.DisplayName} seed rolled {value}; locked in.");
 
             if (match.SeedRollA.HasValue && match.SeedRollB.HasValue)
                 ResolveSeeding(match);
@@ -347,20 +410,20 @@ public sealed class DeathRollTournamentService : IDisposable
         {
             if (!isOpeningDeathRoll)
             {
-                log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}; could not verify they used /random {match.CurrentMax}.");
+                log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}; could not verify they used {GetRollCommand(match.CurrentMax)}.");
                 AnnounceWrongRollRange(match, player);
                 return true;
             }
         }
         else if (isOpeningDeathRoll && maxFromLine.Value == Tournament.SeedingMax)
         {
-            log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}/{maxFromLine.Value}; that is a seed-roll range, not the opening /random death roll.");
+            log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}/{maxFromLine.Value}; that is a seed-roll range, not the opening death roll command.");
             AnnounceWrongRollRange(match, player);
             return true;
         }
         else if (maxFromLine.Value != match.CurrentMax)
         {
-            log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}/{maxFromLine.Value}; expected {(isOpeningDeathRoll ? "/random or /random " : "/random ")}{match.CurrentMax}.");
+            log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll {value}/{maxFromLine.Value}; expected {GetExpectedRollCommand(match)}.");
             AnnounceWrongRollRange(match, player);
             return true;
         }
@@ -373,10 +436,9 @@ public sealed class DeathRollTournamentService : IDisposable
             {
                 match.CurrentTurn = otherPlayer;
                 match.History.Add($"{player.DisplayName} rolled 0 on the opening death roll; turn skipped to {otherPlayer.DisplayName}.");
-                log.Add(LogCategory.Info, $"DRT {match.Label}: {player.DisplayName} rolled 0 on the opening death roll; skipping to {otherPlayer.DisplayName}.");
-                EnqueueDrtChat($"DRT {match.Label}: {player.DisplayName} rolled 0. {otherPlayer.DisplayName}, roll /random.");
-                if (chat.DemoMode)
-                    QueueDemoRoll(otherPlayer.DisplayName, match.CurrentMax);
+                log.Add(LogCategory.Info, $"DRT {MatchLabel(match)}: {player.DisplayName} rolled 0 on the opening death roll; skipping to {otherPlayer.DisplayName}.");
+                EnqueueDrtChat($"DRT {MatchLabel(match)}: {player.DisplayName} rolled 0. {otherPlayer.DisplayName}, roll {GetRollCommand()}.");
+                QueueAutomaticRollIfNeeded(otherPlayer, match.CurrentMax);
                 return true;
             }
 
@@ -390,7 +452,7 @@ public sealed class DeathRollTournamentService : IDisposable
         var rollLabel = maxFromLine.HasValue ? $"{value}/{match.CurrentMax}" : $"{value}/default {match.CurrentMax}";
         match.FirstDeathRollTaken = true;
         match.History.Add($"{player.DisplayName} rolled {rollLabel}.");
-        log.Add(LogCategory.Info, $"DRT {match.Label}: {player.DisplayName} rolled {rollLabel}.");
+        log.Add(LogCategory.Info, $"DRT {MatchLabel(match)}: {player.DisplayName} rolled {rollLabel}.");
 
         if (value == 1)
         {
@@ -403,8 +465,8 @@ public sealed class DeathRollTournamentService : IDisposable
         match.CurrentTurn = match.OtherPlayer(player);
         if (config.DeathRoll.AnnounceNextTurnAfterRoll)
             PromptCurrentTurn(match);
-        else if (chat.DemoMode && match.CurrentTurn is not null)
-            QueueDemoRoll(match.CurrentTurn.DisplayName, match.CurrentMax);
+        else if (match.CurrentTurn is not null)
+            QueueAutomaticRollIfNeeded(match.CurrentTurn, match.CurrentMax);
         return true;
     }
 
@@ -415,15 +477,12 @@ public sealed class DeathRollTournamentService : IDisposable
 
         if (match.SeedRollA.Value == match.SeedRollB.Value)
         {
-            EnqueueDrtChat($"DRT {match.Label}: seed tie at {match.SeedRollA.Value}. Roll /random {Tournament.SeedingMax} again.");
+            EnqueueDrtChat($"DRT {MatchLabel(match)}: seed tie at {match.SeedRollA.Value}. Roll {GetSeedRollCommand()} again.");
             match.History.Add($"Seed tie at {match.SeedRollA.Value}; re-roll seeding.");
             match.SeedRollA = null;
             match.SeedRollB = null;
-            if (chat.DemoMode)
-            {
-                QueueDemoRoll(match.PlayerA.DisplayName, Tournament.SeedingMax);
-                QueueDemoRoll(match.PlayerB.DisplayName, Tournament.SeedingMax);
-            }
+            QueueAutomaticSeedRollIfNeeded(match, match.PlayerA);
+            QueueAutomaticSeedRollIfNeeded(match, match.PlayerB);
             return;
         }
 
@@ -433,9 +492,8 @@ public sealed class DeathRollTournamentService : IDisposable
         match.OpeningRollsAcceptedAfterUtc = DateTime.UtcNow.AddSeconds(0.75);
         match.Status = DeathRollMatchStatus.Playing;
         match.History.Add($"{match.CurrentTurn.DisplayName} goes first after seed rolls {match.SeedRollA}/{match.SeedRollB}.");
-        EnqueueDrtChat($"DRT {match.Label}: {match.CurrentTurn.DisplayName} goes first. Start with /random.");
-        if (chat.DemoMode)
-            QueueDemoRoll(match.CurrentTurn.DisplayName, match.CurrentMax);
+        EnqueueDrtChat($"DRT {MatchLabel(match)}: {match.CurrentTurn.DisplayName} goes first. Start with {GetRollCommand()}.");
+        QueueAutomaticRollIfNeeded(match.CurrentTurn, match.CurrentMax);
     }
 
     private void CompleteMatch(DeathRollMatch match, DeathRollPlayer? winner, DeathRollPlayer loser, string eliminationReason = "rolled 1")
@@ -447,8 +505,8 @@ public sealed class DeathRollTournamentService : IDisposable
         match.CurrentTurn = null;
         loser.Eliminated = true;
         match.History.Add($"{loser.DisplayName} {eliminationReason} and is eliminated. {winner.DisplayName} advances.");
-        EnqueueDrtChat($"DRT {match.Label}: {loser.DisplayName} {eliminationReason} and is eliminated. {winner.DisplayName} advances.");
-        log.Add(LogCategory.Info, $"DRT {match.Label} complete. Winner: {winner.DisplayName}.");
+        EnqueueDrtChat($"DRT {MatchLabel(match)}: {loser.DisplayName} {eliminationReason} and is eliminated. {winner.DisplayName} advances.");
+        log.Add(LogCategory.Info, $"DRT {MatchLabel(match)} complete. Winner: {winner.DisplayName}.");
         AdvanceBracketIfReady();
     }
 
@@ -560,6 +618,9 @@ public sealed class DeathRollTournamentService : IDisposable
         var body = StripChatNoise(message.Message.ToString());
         if (string.IsNullOrWhiteSpace(sender) && string.IsNullOrWhiteSpace(body)) return;
 
+        if (TryHandleJoinMessage(sender, body, message))
+            return;
+
         var combined = string.IsNullOrWhiteSpace(sender) ? body : $"{sender} {body}";
         if (!LooksLikeRandom(combined)) return;
 
@@ -577,13 +638,16 @@ public sealed class DeathRollTournamentService : IDisposable
             return;
         }
 
-        var roller = ResolveRollerName(sender, body, combined);
+        var roller = ResolveRollerName(sender, body, combined, max);
         if (string.IsNullOrWhiteSpace(roller))
         {
             if (Tournament.Status == DeathRollTournamentStatus.Running && Tournament.ActiveMatch is not null)
                 log.Add(LogCategory.Warnings, $"DRT parsed random {value}/{(max.HasValue ? max.Value.ToString() : "?")} but could not identify the roller. sender='{sender}', body='{body}'.");
             return;
         }
+
+        if (TryRejectRollCommandForConfiguredChannel(roller, message))
+            return;
 
         TryHandleRandomRoll(roller, value, max);
     }
@@ -607,13 +671,333 @@ public sealed class DeathRollTournamentService : IDisposable
             nextDemoRollTime = ImGuiNETShim.TimeNow() + chat.DeathRollDelaySeconds;
     }
 
+    private void QueueAutomaticSeedRollIfNeeded(DeathRollMatch match, DeathRollPlayer? player)
+    {
+        if (player is null)
+            return;
+
+        QueueAutomaticRollIfNeeded(player, Tournament.SeedingMax);
+    }
+
+    private void QueueAutomaticRollIfNeeded(DeathRollPlayer? player, int max)
+    {
+        if (player is null)
+            return;
+
+        if (chat.DemoMode)
+            QueueDemoRoll(player.DisplayName, max);
+    }
+
+    private bool TryHandleJoinMessage(string sender, string body, IHandleableChatMessage message)
+    {
+        if (!config.DeathRoll.JoinBroadcastActive || Tournament.Status != DeathRollTournamentStatus.Setup)
+            return false;
+
+        if (!IsJoinCommandMessage(body))
+            return false;
+
+        if (!IsJoinChatChannelAllowed(message))
+        {
+            log.Add(LogCategory.Warnings, $"DRT !join saw a join message but ignored it because the incoming chat channel is not allowed for the configured DRT output. sender='{sender}', body='{body}', metadata='{GetMessageLogKindText(message)}; {GetChatTypeText(message)}'.");
+            return false;
+        }
+
+        var identity = ParseJoinIdentity(sender);
+        if (string.IsNullOrWhiteSpace(identity.Name))
+            identity = ParseJoinIdentityFromBody(body);
+
+        if (string.IsNullOrWhiteSpace(identity.Name))
+        {
+            log.Add(LogCategory.Warnings, $"DRT !join could not parse the joining player's name. sender='{sender}', body='{body}'.");
+            return false;
+        }
+
+        if (AddEntrant(identity, out var reason))
+        {
+            EnqueueDrtChat($"{identity.Name} joined the DRT Tournament.");
+            log.Add(LogCategory.Info, $"DRT !join added {identity}.");
+        }
+        else
+        {
+            log.Add(LogCategory.Warnings, $"DRT !join ignored {identity}: {reason}");
+        }
+
+        return true;
+    }
+
+
+    private static bool IsJoinCommandMessage(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return false;
+
+        var cleaned = StripChatNoise(body);
+
+        // Do not let our own broadcast prompt ("Type !join in chat...") join the
+        // plugin owner. A valid join message should be just !join, optionally with
+        // a chat/player prefix added by Dalamud or another chat formatter.
+        if (Regex.IsMatch(cleaned, @"(?i)\btype\s+!join\b|\bto\s+join\s+the\s+DRT\s+Tournament\b"))
+            return false;
+
+        cleaned = Regex.Replace(cleaned, @"(?i)^\s*\[[^\]]+\]\s*", string.Empty).Trim();
+        cleaned = Regex.Replace(cleaned, @"^\s*[\p{L}\p{N}'\- ]+(?:@[\p{L}\p{N}'\- ]+)?\s*[:：>]\s*", string.Empty).Trim();
+
+        return Regex.IsMatch(cleaned, @"(?i)^!join\s*[!.?,]?\s*$");
+    }
+
+    private bool IsJoinChatChannelAllowed(IHandleableChatMessage message)
+    {
+        var channel = GetIncomingTextChatChannel(message);
+        if (UseDiceCommandWording())
+            return channel == IncomingTextChatChannel.Party;
+
+        return channel is IncomingTextChatChannel.Say or IncomingTextChatChannel.Yell or IncomingTextChatChannel.Shout;
+    }
+
+    private PlayerIdentity ParseJoinIdentity(string sender)
+    {
+        sender = StripChatNoise(sender);
+        if (string.IsNullOrWhiteSpace(sender))
+            return default;
+
+        var atParts = sender.Split('@', 2, StringSplitOptions.TrimEntries);
+        if (atParts.Length == 2)
+            return new PlayerIdentity(CleanPlayerName(atParts[0]), CleanWorldName(atParts[1]));
+
+        var world = GetLocalPlayerIdentity().World;
+        return new PlayerIdentity(CleanPlayerName(sender), world);
+    }
+
+
+    private PlayerIdentity ParseJoinIdentityFromBody(string body)
+    {
+        body = StripChatNoise(body);
+        if (string.IsNullOrWhiteSpace(body))
+            return default;
+
+        // Some Dalamud/chat-format combinations expose the sender separately, but
+        // others include a display prefix in the body, such as
+        // "Player Name: !join", "[Party] Player Name: !join", or
+        // "Player Name@World !join". Fall back to parsing that prefix.
+        var cleaned = Regex.Replace(body, @"(?i)^\s*\[[^\]]+\]\s*", string.Empty).Trim();
+        cleaned = Regex.Replace(cleaned, @"(?i)\b!join\b.*$", string.Empty).Trim();
+        cleaned = cleaned.Trim(':', '：', '-', '–', '—', '>', ' ');
+
+        if (string.IsNullOrWhiteSpace(cleaned))
+            return default;
+
+        var atParts = cleaned.Split('@', 2, StringSplitOptions.TrimEntries);
+        if (atParts.Length == 2)
+            return new PlayerIdentity(CleanPlayerName(atParts[0]), CleanWorldName(atParts[1]));
+
+        var world = GetLocalPlayerIdentity().World;
+        return new PlayerIdentity(CleanPlayerName(cleaned), world);
+    }
+
+    private static string CleanWorldName(string value)
+    {
+        value = StripChatNoise(value);
+        value = Regex.Replace(value, @"[^\p{L}\p{N}'\- ]", string.Empty).Trim();
+        return Regex.Replace(value, @"\s+", " ");
+    }
+
     private static bool LooksLikeRandom(string text)
-        => text.Contains("random", StringComparison.OrdinalIgnoreCase) || text.Contains("roll", StringComparison.OrdinalIgnoreCase);
+        => text.Contains("random", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("dice", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("roll", StringComparison.OrdinalIgnoreCase);
+
+    private bool TryRejectRollCommandForConfiguredChannel(string playerName, IHandleableChatMessage message)
+    {
+        var match = Tournament.ActiveMatch;
+        if (Tournament.Status != DeathRollTournamentStatus.Running || match is null || match.Status == DeathRollMatchStatus.Complete)
+            return false;
+
+        var player = match.GetPlayer(playerName);
+        if (player is null)
+            return false;
+
+        var configuredForParty = UseDiceCommandWording();
+        var sourceChannel = GetIncomingRollChannel(message);
+
+        // /dice in party still renders as visible "Random!" text, so command validation
+        // must use Dalamud's LogKind/chat channel metadata instead of the displayed text.
+        // Party DRT expects party /dice; all non-party DRT channels expect normal /random.
+        var acceptsRoll = configuredForParty
+            ? (!config.DeathRoll.RequireDiceRollsInPartyChat || sourceChannel == IncomingRollChannel.Party)
+            : sourceChannel == IncomingRollChannel.Random;
+
+        if (acceptsRoll)
+            return false;
+
+        var expectedCommand = match.Status is DeathRollMatchStatus.SeedingRolls or DeathRollMatchStatus.Waiting
+            ? GetSeedRollCommand()
+            : GetExpectedRollCommand(match);
+
+        var chatType = GetChatTypeText(message);
+        if (configuredForParty && config.DeathRoll.RequireDiceRollsInPartyChat)
+        {
+            log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll because party DRT is configured to require party /dice rolls. Expected {expectedCommand}. Incoming chat metadata: '{chatType}'.");
+            EnqueueDrtChat($"DRT {MatchLabel(match)}: {player.DisplayName}, party DRT only accepts /dice rolls. Use {expectedCommand}.");
+        }
+        else
+        {
+            log.Add(LogCategory.Warnings, $"DRT ignored {player.DisplayName}'s roll because this DRT chat channel expects /random rolls. Expected {expectedCommand}. Incoming chat metadata: '{chatType}'.");
+            EnqueueDrtChat($"DRT {MatchLabel(match)}: {player.DisplayName}, use {expectedCommand}.");
+        }
+
+        return true;
+    }
+
+    private enum IncomingTextChatChannel
+    {
+        Unknown,
+        Party,
+        Say,
+        Yell,
+        Shout
+    }
+
+    private static IncomingTextChatChannel GetIncomingTextChatChannel(IHandleableChatMessage message)
+    {
+        var logKind = GetMessageLogKindText(message);
+        var metadata = GetChatTypeText(message);
+        var combined = string.IsNullOrWhiteSpace(metadata) ? logKind : $"{logKind}; {metadata}";
+
+        if (IsPartyChatKind(combined))
+            return IncomingTextChatChannel.Party;
+        if (IsSayChatKind(combined))
+            return IncomingTextChatChannel.Say;
+        if (IsYellChatKind(combined))
+            return IncomingTextChatChannel.Yell;
+        if (IsShoutChatKind(combined))
+            return IncomingTextChatChannel.Shout;
+
+        return IncomingTextChatChannel.Unknown;
+    }
+
+    private enum IncomingRollChannel
+    {
+        Unknown,
+        Party,
+        Random
+    }
+
+    private static IncomingRollChannel GetIncomingRollChannel(IHandleableChatMessage message)
+    {
+        var logKind = GetMessageLogKindText(message);
+        if (IsPartyChatKind(logKind))
+            return IncomingRollChannel.Party;
+        if (IsRandomChatKind(logKind))
+            return IncomingRollChannel.Random;
+
+        var metadata = GetChatTypeText(message);
+        if (IsPartyChatKind(metadata))
+            return IncomingRollChannel.Party;
+        if (IsRandomChatKind(metadata))
+            return IncomingRollChannel.Random;
+
+        return IncomingRollChannel.Unknown;
+    }
+
+    private static string GetMessageLogKindText(IHandleableChatMessage message)
+    {
+        try
+        {
+            return message.LogKind.ToString();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static bool IsPartyChatKind(string text)
+        => !string.IsNullOrWhiteSpace(text)
+            && Regex.IsMatch(text, @"(?i)(^|[^A-Za-z])(Party|PartyChat|PartyMember|EchoParty)([^A-Za-z]|$)");
+
+    private static bool IsRandomChatKind(string text)
+        => !string.IsNullOrWhiteSpace(text)
+            && Regex.IsMatch(text, @"(?i)(^|[^A-Za-z])(Random|Roll)([^A-Za-z]|$)")
+            && !IsPartyChatKind(text);
+
+    private static bool IsSayChatKind(string text)
+        => !string.IsNullOrWhiteSpace(text)
+            && Regex.IsMatch(text, @"(?i)(^|[^A-Za-z])(Say|SayChat)([^A-Za-z]|$)");
+
+    private static bool IsYellChatKind(string text)
+        => !string.IsNullOrWhiteSpace(text)
+            && Regex.IsMatch(text, @"(?i)(^|[^A-Za-z])(Yell|YellChat)([^A-Za-z]|$)");
+
+    private static bool IsShoutChatKind(string text)
+        => !string.IsNullOrWhiteSpace(text)
+            && Regex.IsMatch(text, @"(?i)(^|[^A-Za-z])(Shout|ShoutChat)([^A-Za-z]|$)");
+
+    private static string GetChatTypeText(IHandleableChatMessage message)
+    {
+        try
+        {
+            var parts = new List<string>();
+            var messageType = message.GetType();
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            foreach (var property in messageType.GetProperties(flags))
+            {
+                if (!LooksLikeChatMetadataName(property.Name))
+                    continue;
+
+                try
+                {
+                    var value = property.GetValue(message);
+                    if (value is not null)
+                        parts.Add($"{property.Name}={value}");
+                }
+                catch
+                {
+                    // Some reflected properties may throw; skip them.
+                }
+            }
+
+            foreach (var field in messageType.GetFields(flags))
+            {
+                if (!LooksLikeChatMetadataName(field.Name))
+                    continue;
+
+                try
+                {
+                    var value = field.GetValue(message);
+                    if (value is not null)
+                        parts.Add($"{field.Name}={value}");
+                }
+                catch
+                {
+                    // Some reflected fields may throw; skip them.
+                }
+            }
+
+            if (parts.Count > 0)
+                return string.Join("; ", parts.Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            // Fall through to unsafe default.
+        }
+
+        return string.Empty;
+    }
+
+    private static bool LooksLikeChatMetadataName(string name)
+        => name.Contains("Type", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Kind", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Channel", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Mode", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Source", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Target", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Chat", StringComparison.OrdinalIgnoreCase);
 
     private static bool LooksLikeRealDiceMessage(IHandleableChatMessage message)
     {
         // Match BarManager's spoof guard: visible text is not enough because
-        // players can type "Random!" manually. Real FFXIV dice messages carry
+        // players can type "Random!" or "Dice!" manually. Real FFXIV dice messages carry
         // non-text SeString payloads such as dice icons/autotranslate arrows.
         try
         {
@@ -664,11 +1048,13 @@ public sealed class DeathRollTournamentService : IDisposable
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
-        // FFXIV /random lines can come from Say/General chat as sender+body, and
+        // FFXIV /random and party /dice lines can come from chat as sender+body, and
         // different chat plugins can format them slightly differently, for example:
         //   Random! (1-10) 7
+        //   Dice! (1-10) 7
         //   Random! (1-999) 737
         //   Jeszie Jane Random! (1-10) 7
+        //   Jeszie Jane Dice! (1-10) 7
         //   Jeszie Jane rolls 7. (1-10)
         // Always extract the max from the range first, remove that range, then use
         // the last remaining standalone number as the rolled value.
@@ -687,9 +1073,11 @@ public sealed class DeathRollTournamentService : IDisposable
         var withoutRange = RandomRangeRegex.Replace(text, " ");
         withoutRange = Regex.Replace(withoutRange, @"\s+", " ").Trim();
 
-        // Current FFXIV English output for /random in chat often looks like:
+        // Current FFXIV English output for /random or /dice in chat often looks like:
         //   Random! You roll 3 (out of 10.)
+        //   Dice! You roll 3 (out of 10.)
         //   Random! <Player> rolls 7 (out of 10.)
+        //   Dice! <Player> rolls 7 (out of 10.)
         // Once the "out of N" range is removed, take the number after roll/rolls first.
         var rollWordMatch = Regex.Match(withoutRange, @"(?i)\b(?:you\s+)?rolls?\s+(?:a\s+|an\s+)?(?<value>\d{1,6})\b");
         if (rollWordMatch.Success && int.TryParse(rollWordMatch.Groups["value"].Value, out value) && value >= 0)
@@ -705,10 +1093,11 @@ public sealed class DeathRollTournamentService : IDisposable
         return false;
     }
 
-    private string ResolveRollerName(string sender, string body, string combined)
+    private string ResolveRollerName(string sender, string body, string combined, int? maxFromLine)
     {
+        var localDisplay = GetLocalPlayerDisplayName();
         if (Regex.IsMatch(body, @"(?i)\byou\s+roll\b") || Regex.IsMatch(combined, @"(?i)\byou\s+roll\b"))
-            return GetLocalPlayerDisplayName();
+            return localDisplay;
 
         if (!string.IsNullOrWhiteSpace(sender) && !LooksLikeRandom(sender))
             return sender;
@@ -720,6 +1109,7 @@ public sealed class DeathRollTournamentService : IDisposable
         var fromCombined = ExtractNameBeforeRandom(combined);
         return fromCombined.Equals("Random", StringComparison.OrdinalIgnoreCase) ? string.Empty : fromCombined;
     }
+
 
     private PlayerIdentity TryResolveTargetIdentity(object target, out string resolutionLog)
     {
@@ -979,7 +1369,7 @@ public sealed class DeathRollTournamentService : IDisposable
     private static string StripChatNoise(string value)
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        var chars = value.Where(c => !char.IsControl(c) && (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || c is '\'' or '-' or ',' or '.' or '@' or '(' or ')')).ToArray();
+        var chars = value.Where(c => !char.IsControl(c) && (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || c is '\'' or '-' or ',' or '.' or '@' or '(' or ')' or '!' or ':' or '：')).ToArray();
         return Regex.Replace(new string(chars), @"\s+", " ").Trim().Trim('.', ' ');
     }
 
