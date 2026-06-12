@@ -180,6 +180,30 @@ public sealed class ProfileSettingsTab
             if (locked) ImGui.EndDisabled();
         });
 
+        UiHelpers.Card("Initial Deal", () =>
+        {
+            if (locked) ImGui.BeginDisabled();
+
+            var dealMode = rules.InitialDealMode == BlackjackInitialDealMode.PlayerFullHandsThenDealer ? 1 : 0;
+            var dealModeLabels = new[]
+            {
+                "Round-robin: player card 1s, dealer visible card, player card 2s",
+                "Full player hands first: each player gets 2 cards, dealer visible card last"
+            };
+
+            ImGui.SetNextItemWidth(420f);
+            if (ImGui.Combo("Initial dealing mode", ref dealMode, dealModeLabels, dealModeLabels.Length))
+            {
+                rules.InitialDealMode = dealMode == 1
+                    ? BlackjackInitialDealMode.PlayerFullHandsThenDealer
+                    : BlackjackInitialDealMode.RoundRobin;
+                SaveRules(rules);
+            }
+            UiHelpers.Tooltip("Full player hands first announces each player's starting hand only after both starting cards are rolled.");
+
+            if (locked) ImGui.EndDisabled();
+        });
+
         UiHelpers.Card("Actions / Dealer", () =>
         {
             if (locked) ImGui.BeginDisabled();

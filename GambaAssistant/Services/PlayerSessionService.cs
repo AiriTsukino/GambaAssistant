@@ -57,7 +57,6 @@ public sealed class PlayerSessionService
         {
             player.Hands.Clear();
             player.Hands.Add(new BlackjackHand { HandNumber = 1, Bet = amount, OriginalBet = amount });
-            player.Hands.Add(new BlackjackHand { HandNumber = 1, Bet = amount });
         }
         else
         {

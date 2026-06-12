@@ -377,6 +377,9 @@ public sealed class TableTab
             .OrderBy(p => p.PartySlot)
             .ToList();
 
+        foreach (var player in roundPlayers)
+            NormalizePrimaryHandForNewDeal(player);
+
         session.Round = new BlackjackRound
         {
             RoundNumber = session.Round.RoundNumber,
@@ -391,9 +394,21 @@ public sealed class TableTab
 
         QueueAstrologianInitialDealFlavor(roundPlayers);
 
-        // Deal in table order: one card to each active player, one visible dealer card,
-        // then the second card to each active player. The dealer's final/reveal card is
-        // still rolled later during Dealer Turn per the venue rules.
+        if (session.Rules.InitialDealMode == BlackjackInitialDealMode.PlayerFullHandsThenDealer)
+        {
+            // Deal each player's complete starting hand first, announce that hand only
+            // after both cards resolve, then deal the dealer's visible card last.
+            foreach (var p in session.Round.Players)
+                RequestInitialPlayerFullHand(p, p.Hands[0]);
+
+            RequestDealerCard("Dealer visible card", CountInitialDealCardResolved, continueDealerTurn: false);
+            log.Add(LogCategory.RoundFlow, "Started full-hand initial deal using visible /dice results.");
+            return;
+        }
+
+        // Round-robin/table-order deal: one card to each active player, one visible
+        // dealer card, then the second card to each active player. The dealer's
+        // final/reveal card is still rolled later during Dealer Turn per venue rules.
         foreach (var p in session.Round.Players)
             RequestCard(p, p.Hands[0], "Initial card 1", CountInitialDealCardResolved);
 
@@ -402,7 +417,58 @@ public sealed class TableTab
         foreach (var p in session.Round.Players)
             RequestCard(p, p.Hands[0], "Initial card 2", CountInitialDealCardResolved);
 
-        log.Add(LogCategory.RoundFlow, "Started table-order initial deal using visible /dice results.");
+        log.Add(LogCategory.RoundFlow, "Started round-robin initial deal using visible /dice results.");
+    }
+
+    private static void NormalizePrimaryHandForNewDeal(PlayerSessionState player)
+    {
+        var bet = player.Bank.ActiveBet;
+        player.Hands.Clear();
+        player.Hands.Add(new BlackjackHand
+        {
+            HandNumber = 1,
+            Bet = bet,
+            OriginalBet = bet,
+            IsComplete = false,
+            IsBusted = false,
+            IsDoubled = false,
+            IsSplitHand = false,
+            IsVoided = false
+        });
+    }
+
+    private void RequestInitialPlayerFullHand(PlayerSessionState player, BlackjackHand hand)
+    {
+        var cardsResolvedForHand = 0;
+
+        void ApplyInitialCard(BlackjackCard card, string reason)
+        {
+            hand.AddCard(card);
+            hand.Actions.Add(reason);
+            cardsResolvedForHand++;
+
+            if (cardsResolvedForHand >= 2)
+                AnnounceInitialPlayerHand(player, hand);
+
+            CountInitialDealCardResolved();
+        }
+
+        dice.RequestRoll($"Initial card 1 for {player.DisplayName} Hand {hand.HandNumber}", c => ApplyInitialCard(c, "Initial card 1"));
+        dice.RequestRoll($"Initial card 2 for {player.DisplayName} Hand {hand.HandNumber}", c => ApplyInitialCard(c, "Initial card 2"));
+    }
+
+    private void AnnounceInitialPlayerHand(PlayerSessionState player, BlackjackHand hand)
+    {
+        if (IsNaturalByRules(hand))
+        {
+            chat.EnqueueParty($"🎉 {player.DisplayName} has a Natural Blackjack! {hand.CardText} = 21.");
+            log.Add(LogCategory.RoundFlow, $"{player.DisplayName} has a Natural Blackjack on {hand.CardText}.");
+            return;
+        }
+
+        chat.EnqueueParty($"{player.DisplayName} receives {hand.CardText}. Hand: {hand.CardText} = {hand.TotalText}.");
+        if (hand.IsBusted)
+            chat.EnqueueParty($"{player.DisplayName} busts with {hand.BestTotal}.");
     }
 
     private void QueueAstrologianInitialDealFlavor(IReadOnlyList<PlayerSessionState> roundPlayers)

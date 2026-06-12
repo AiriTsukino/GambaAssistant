@@ -39,6 +39,7 @@ public sealed class RulesTab
         UiHelpers.Card("Blackjack Rules", () =>
         {
             ImGui.TextWrapped($"Cards are generated from visible party-scoped {rules.DiceCommand} rolls. Mapping: 1=A, 11=J, 12=Q, 13=K. No suits. Infinite/deckless model; duplicates are allowed.");
+            ImGui.Text($"Initial deal mode: {InitialDealModeLabel(rules.InitialDealMode)}");
             ImGui.Text($"Tie result: {(rules.PushOnTie ? "Push" : "Dealer wins")}");
             ImGui.Text($"Split enabled: {rules.SplittingEnabled}");
             ImGui.Text($"Split hands can be split again: {rules.ResplitPairs}");
@@ -48,4 +49,10 @@ public sealed class RulesTab
             ImGui.Text($"Dealer stands on all 17s including soft 17: {rules.DealerStandsOnSoft17}");
         });
     }
+
+    private static string InitialDealModeLabel(BlackjackInitialDealMode mode) => mode switch
+    {
+        BlackjackInitialDealMode.PlayerFullHandsThenDealer => "Full player hands first, dealer visible card last",
+        _ => "Round-robin"
+    };
 }
