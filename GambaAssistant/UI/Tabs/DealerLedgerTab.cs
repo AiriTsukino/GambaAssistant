@@ -33,10 +33,11 @@ public sealed class DealerLedgerTab
             UiHelpers.Tooltip("Enter the gil you actually have at the end of the night. Clear this if you are not reconciling yet.");
 
             ImGui.Separator();
-            ImGui.Text($"Expected dealer gil: {ledger.ExpectedDealerGil:N0} gil");
-            if (ledger.Difference.HasValue)
+            ImGui.Text($"Expected dealer gil: {service.ExpectedDealerGil:N0} gil");
+            ImGui.TextDisabled($"Outstanding player banks: {service.OutstandingPlayerBanks:N0} gil");
+            if (service.Difference.HasValue)
             {
-                var diff = ledger.Difference.Value;
+                var diff = service.Difference.Value;
                 ImGui.TextColored(diff == 0 ? GambaTheme.Green : diff > 0 ? GambaTheme.Gold : GambaTheme.Red,
                     $"Difference: {diff:N0} gil");
             }
@@ -79,7 +80,8 @@ public sealed class DealerLedgerTab
 
         UiHelpers.Card("Session Totals", () =>
         {
-            ImGui.Text($"Game P/L: {ledger.GameProfitLoss:N0} gil");
+            ImGui.Text($"Live game P/L from banks: {service.LiveGameProfitLoss:N0} gil");
+            ImGui.Text($"Settled hand P/L: {ledger.GameProfitLoss:N0} gil");
             ImGui.Text($"Dealer tips: {ledger.DealerTips:N0} gil");
             ImGui.Text($"Venue tips: {ledger.VenueTips:N0} gil");
             ImGui.Text($"Misc adjustments: {ledger.MiscAdjustments:N0} gil");

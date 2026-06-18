@@ -34,6 +34,7 @@ public sealed class BlackjackHand
     {
         Cards.Add(card);
         if (BestTotal > 21) { IsBusted = true; IsComplete = true; }
+        else if (BestTotal == 21) IsComplete = true;
         if (IsNaturalBlackjack) IsComplete = true;
     }
 }

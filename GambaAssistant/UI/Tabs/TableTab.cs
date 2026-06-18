@@ -1,5 +1,6 @@
 using Dalamud.Bindings.ImGui;
 using GambaAssistant.Games.Blackjack;
+using GambaAssistant.Models.Ledger;
 using GambaAssistant.Models.Players;
 using GambaAssistant.Services;
 using GambaAssistant.UI.Components;
@@ -18,7 +19,6 @@ public sealed class TableTab
     private readonly ChatQueueService chat;
     private readonly UndoService undo;
     private readonly LogService log;
-    private readonly Action openSettings;
     private readonly Dictionary<string, long> customBets = new();
     private readonly Dictionary<string, long> quickDeposits = new();
     private int pendingInitialDealCards;
@@ -26,7 +26,7 @@ public sealed class TableTab
     private bool allBustRoundOverAnnounced;
     private double nextLivePartySyncTime;
 
-    public TableTab(Configuration config, BlackjackSession session, ProfileService profiles, PartyService party, PlayerSessionService players, DealerLedgerService dealerLedger, DiceService dice, ChatQueueService chat, UndoService undo, LogService log, Action openSettings)
+    public TableTab(Configuration config, BlackjackSession session, ProfileService profiles, PartyService party, PlayerSessionService players, DealerLedgerService dealerLedger, DiceService dice, ChatQueueService chat, UndoService undo, LogService log)
     {
         this.config = config;
         this.session = session;
@@ -38,7 +38,6 @@ public sealed class TableTab
         this.chat = chat;
         this.undo = undo;
         this.log = log;
-        this.openSettings = openSettings;
     }
 
     public void Draw()
@@ -68,28 +67,17 @@ public sealed class TableTab
     {
         UiHelpers.Card("Table Status", () =>
         {
-            ImGui.Columns(3, "##table-status-columns", false);
             ImGui.TextColored(GambaTheme.Gold, $"Round {session.Round.RoundNumber}");
-            ImGui.Text($"Phase: {session.Round.Phase}");
-            ImGui.NextColumn();
-            ImGui.Text($"Chat/Dice: {chat.Status}");
-            ImGui.Text($"Dice pending/queued: {dice.QueuedCount}");
+            DrawWrappedDisabled($"Phase: {session.Round.Phase}");
+            DrawWrappedDisabled($"Chat/Dice: {chat.Status}");
+            DrawWrappedDisabled($"Dice pending/queued: {dice.QueuedCount}");
             if (dice.Pending is not null)
-                ImGui.TextDisabled($"Waiting for visible dealer dice: {dice.Pending.Purpose}");
-            ImGui.TextDisabled(chat.DemoMode
+                DrawWrappedDisabled($"Waiting for visible dealer dice: {dice.Pending.Purpose}");
+
+            DrawWrappedDisabled(chat.DemoMode
                 ? "Party sync: Demo mode isolated"
                 : $"Party sync: {party.LastLivePartyMemberCount} live party member(s)");
-            ImGui.NextColumn();
-            var overlayEnabled = config.Overlay.Enabled;
-            if (ImGui.Checkbox("Enable overlay", ref overlayEnabled))
-                config.Overlay.Enabled = overlayEnabled;
 
-            var compactOverlay = config.Overlay.Compact;
-            if (ImGui.Checkbox("Compact overlay", ref compactOverlay))
-                config.Overlay.Compact = compactOverlay;
-
-            if (ImGui.Button("Settings")) openSettings();
-            ImGui.Columns(1);
         });
     }
 
@@ -97,11 +85,14 @@ public sealed class TableTab
     {
         UiHelpers.Card("Dealer Controls", () =>
         {
-            if (ImGui.Button("Pause")) chat.Pause();
-            ImGui.SameLine();
-            if (ImGui.Button("Resume")) chat.Resume();
-            ImGui.SameLine();
-            if (ImGui.Button("Panic Stop"))
+            DrawControlGroupHeader("Automation");
+            if (ButtonWithTooltip("Pause", "Pause queued chat and dice automation without changing the current Blackjack round."))
+                chat.Pause();
+            DrawSameLineIfFits("Resume");
+            if (ButtonWithTooltip("Resume", "Resume queued chat and dice automation."))
+                chat.Resume();
+            DrawSameLineIfFits("Panic Stop");
+            if (ButtonWithTooltip("Panic Stop", "Stops queued party messages and dice commands, clears pending dice rolls, then pauses automation so the dealer can recover safely."))
             {
                 chat.PanicClear();
                 dice.ClearPendingAndQueued();
@@ -109,19 +100,15 @@ public sealed class TableTab
                 dealerTurnStarted = false;
                 allBustRoundOverAnnounced = false;
             }
-            UiHelpers.Tooltip("Stops queued party messages and dice commands, clears pending dice rolls, then pauses automation so the dealer can recover safely.");
-
-            ImGui.Separator();
-
-            if (ImGui.Button("Sync Party Now"))
+            DrawSameLineIfFits("Sync Party Now");
+            if (ButtonWithTooltip("Sync Party Now", "Forces an immediate live party refresh. Demo mode remains isolated."))
             {
                 players.SyncParty(party.GetPartyTableOrder());
                 nextLivePartySyncTime = ImGui.GetTime() + 1.0;
             }
-            UiHelpers.Tooltip("Live mode automatically syncs the FFXIV party list about once per second. This button forces an immediate refresh. Demo mode remains isolated.");
 
-            ImGui.SameLine();
-            if (UiHelpers.DisabledAwareButton("Open Betting", session.Round.Phase is BlackjackPhase.Idle or BlackjackPhase.CashOutBetweenHands, "Betting can only open between hands."))
+            DrawControlGroupHeader("Round Flow");
+            if (DisabledButtonWithTooltip("Open Betting", session.Round.Phase is BlackjackPhase.Idle or BlackjackPhase.CashOutBetweenHands, "Betting can only open between hands.", "Open the betting window for the next Blackjack round."))
             {
                 dealerTurnStarted = false;
                 allBustRoundOverAnnounced = false;
@@ -130,24 +117,31 @@ public sealed class TableTab
                 log.Add(LogCategory.RoundFlow, $"Betting opened for internal Round {session.Round.RoundNumber}.");
             }
 
-            ImGui.SameLine();
-            if (UiHelpers.DisabledAwareButton("Start Dealing", session.Round.Phase == BlackjackPhase.BettingOpen && session.SessionPlayers.Any(p => p.BetConfirmed), "Confirm at least one valid bet first."))
+            DrawSameLineIfFits("Start Dealing");
+            if (DisabledButtonWithTooltip("Start Dealing", session.Round.Phase == BlackjackPhase.BettingOpen && session.SessionPlayers.Any(p => p.BetConfirmed), "Confirm at least one valid bet first.", "Close betting and start rolling the initial Blackjack deal."))
                 StartDealing();
 
-            ImGui.SameLine();
-            if (UiHelpers.DisabledAwareButton("Settle Round", session.Round.Phase == BlackjackPhase.Settlement, "Settlement is available once player/dealer resolution is complete."))
+            DrawSameLineIfFits("Settle Round");
+            if (DisabledButtonWithTooltip("Settle Round", session.Round.Phase == BlackjackPhase.Settlement, "Settlement is available once player/dealer resolution is complete.", "Settle every active hand against the dealer and move to the between-hands cashout phase."))
                 SettleRound();
 
-            ImGui.SameLine();
+            DrawControlGroupHeader("Broadcasts");
+            if (DisabledButtonWithTooltip("Rebroadcast Turn", session.Round.Phase == BlackjackPhase.PlayerTurns && session.ActivePlayer is not null && session.ActiveHand is not null, "A player hand must be active.", "Repeat the active player's turn/options and the visible dealer hand in party chat."))
+                RebroadcastCurrentTurnAndDealer();
+
+            DrawSameLineIfFits("Rebroadcast Banks");
+            if (ButtonWithTooltip("Rebroadcast Banks", "Broadcast all current player banks in compact grouped messages."))
+                RebroadcastCurrentBanks();
+
+            DrawControlGroupHeader("Recovery");
             var hasUndo = undo.Actions.Count > 0;
-            if (UiHelpers.DisabledAwareButton($"Undo Last ({undo.Actions.Count})", hasUndo, "There are no reversible actions in the current undo stack."))
+            if (DisabledButtonWithTooltip($"Undo Last ({undo.Actions.Count})", hasUndo, "There are no reversible actions in the current undo stack.", "Undo the most recent dealer button/action and restore the Blackjack table state."))
                 undo.TryUndoLast();
 
-            var nextUndo = undo.Actions.FirstOrDefault();
-            if (nextUndo is not null)
-                ImGui.TextDisabled($"Next undo: {nextUndo.Label}");
-
-            if (UiHelpers.ConfirmingButton("Reset Night", "Confirm Reset Night", "This clears the current-night banks, ledger, logs, round history, and active hands. Exports are not automatic."))
+            DrawSameLineIfFits("Reset Night");
+            var resetClicked = UiHelpers.ConfirmingButton("Reset Night", "Confirm Reset Night", "This clears the current-night banks, ledger, logs, round history, and active hands. Exports are not automatic.");
+            UiHelpers.Tooltip("Clear the whole current-night Blackjack table state. Use this only when starting over.");
+            if (resetClicked)
             {
                 session.ResetNight();
                 log.Clear();
@@ -156,6 +150,10 @@ public sealed class TableTab
                 dealerTurnStarted = false;
                 allBustRoundOverAnnounced = false;
             }
+
+            var nextUndo = undo.Actions.FirstOrDefault();
+            if (nextUndo is not null)
+                DrawWrappedDisabled($"Next undo: {nextUndo.Label}");
         });
     }
 
@@ -166,17 +164,17 @@ public sealed class TableTab
         UiHelpers.Card("Dealer Hand / Bank", () =>
         {
             var ledger = dealerLedger.Ledger;
-            ImGui.TextColored(GambaTheme.Gold, $"Dealer tracked gil: {ledger.ExpectedDealerGil:N0} gil");
-            ImGui.TextDisabled($"Starting {ledger.StartingGil:N0} + game/tips/adjustments/deposits - cash-outs");
+            ImGui.TextColored(GambaTheme.Gold, $"Dealer tracked gil: {dealerLedger.ExpectedDealerGil:N0} gil");
+            DrawWrappedDisabled($"Starting {ledger.StartingGil:N0} + deposits/tips/adjustments - cash-outs - outstanding player banks ({dealerLedger.OutstandingPlayerBanks:N0})");
             if (ledger.ActualEndingGil.HasValue)
-                ImGui.TextDisabled($"Actual ending gil entered: {ledger.ActualEndingGil.Value:N0} gil | Difference: {ledger.Difference.GetValueOrDefault():N0} gil");
+                DrawWrappedDisabled($"Actual ending gil entered: {ledger.ActualEndingGil.Value:N0} gil | Difference: {dealerLedger.Difference.GetValueOrDefault():N0} gil");
             ImGui.Separator();
-            ImGui.Text($"Cards: {session.Round.DealerHand.CardText}");
-            ImGui.Text($"Total: {session.Round.DealerHand.TotalText}");
+            DrawWrappedText($"Cards: {session.Round.DealerHand.CardText}");
+            DrawWrappedText($"Total: {session.Round.DealerHand.TotalText}");
             if (session.Round.Phase == BlackjackPhase.DealerTurn)
-                ImGui.TextDisabled(dealerTurnStarted ? "Dealer automation is resolving." : "Dealer turn is ready.");
+                DrawWrappedDisabled(dealerTurnStarted ? "Dealer automation is resolving." : "Dealer turn is ready.");
             else if (session.Round.Phase == BlackjackPhase.Settlement && AllPlayerHandsAreTerminalLosses())
-                ImGui.TextDisabled("All active players are bust/void. Dealer hand is skipped for this round.");
+                DrawWrappedDisabled("All active players are bust/void. Dealer hand is skipped for this round.");
         });
     }
 
@@ -184,6 +182,7 @@ public sealed class TableTab
     {
         UiHelpers.Card("Party Table", () =>
         {
+            DrawWrappedDisabled("Players are grouped into compact cards so action buttons wrap instead of clipping on smaller windows.");
             foreach (var p in session.SessionPlayers.OrderBy(p => p.PartySlot))
                 DrawPlayerRow(p);
         });
@@ -195,10 +194,20 @@ public sealed class TableTab
         ImGui.Separator();
 
         ImGui.TextColored(p.Status == PlayerStatus.Dealer ? GambaTheme.Gold : GambaTheme.Text, $"{p.PartySlot}. {p.DisplayName}");
-        ImGui.SameLine();
-        ImGui.TextDisabled($"Status: {p.Status}");
-        ImGui.SameLine();
-        ImGui.TextDisabled($"Bank: {p.Bank.Available:N0} + Active {p.Bank.ActiveBet:N0} = {p.Bank.TotalTracked:N0}");
+        DrawWrappedDisabled($"Status: {p.Status}");
+        DrawWrappedDisabled($"Bank: {p.Bank.Available:N0} available | {p.Bank.ActiveBet:N0} active bet | {p.Bank.TotalTracked:N0} total tracked");
+
+        if (p.Status != PlayerStatus.Dealer)
+        {
+            var removeClicked = UiHelpers.ConfirmingButton($"Remove##remove-{p.Identity}", $"Confirm Remove##remove-{p.Identity}", "Remove this player from the table. Active unfinished hands are voided first.");
+            UiHelpers.Tooltip("Remove this player from the Blackjack table. Use this when someone leaves or should no longer be tracked at the table.");
+            if (removeClicked)
+            {
+                players.RemovePlayer(p, "Manually removed from Blackjack table");
+                ImGui.PopID();
+                return;
+            }
+        }
 
         if (p.Status == PlayerStatus.Dealer)
         {
@@ -217,36 +226,57 @@ public sealed class TableTab
     private void DrawBettingControls(PlayerSessionState p)
     {
         ImGui.Indent(12f);
-        ImGui.TextDisabled("Bet controls");
-        if (UiHelpers.DisabledAwareButton("Min Bet", p.Bank.Available >= session.Rules.MinimumBet, "Player does not have enough available bank for the table minimum."))
+        DrawControlGroupHeader("Bet controls");
+
+        if (DisabledButtonWithTooltip("Min Bet", p.Bank.Available >= session.Rules.MinimumBet, "Player does not have enough available bank for the table minimum.", "Reserve the configured table minimum as this player's bet."))
             ReserveBetWithUndo(p, session.Rules.MinimumBet, "Min bet");
-        ImGui.SameLine();
-        if (UiHelpers.DisabledAwareButton("Last Bet", p.Bank.LastBet > 0 && p.Bank.Available >= p.Bank.LastBet, "No last bet is available, or the player lacks available bank."))
+        DrawSameLineIfFits("Last Bet");
+        if (DisabledButtonWithTooltip("Last Bet", p.Bank.LastBet > 0 && p.Bank.Available >= p.Bank.LastBet, "No last bet is available, or the player lacks available bank.", "Repeat this player's most recent confirmed bet."))
             ReserveBetWithUndo(p, p.Bank.LastBet, "Last bet");
-        ImGui.SameLine();
-        if (UiHelpers.DisabledAwareButton("Recent Trade", p.Bank.LastTradeAmount > 0 && p.Bank.Available >= p.Bank.LastTradeAmount, "No recent trade is available, or the player lacks available bank."))
+        DrawSameLineIfFits("Recent Trade");
+        if (DisabledButtonWithTooltip("Recent Trade", p.Bank.LastTradeAmount > 0 && p.Bank.Available >= p.Bank.LastTradeAmount, "No recent trade is available, or the player lacks available bank.", "Use the most recent detected trade amount as this player's bet."))
             ReserveBetWithUndo(p, p.Bank.LastTradeAmount, "Recent trade bet");
+        DrawSameLineIfFits("Unbet");
+        if (DisabledButtonWithTooltip("Unbet", p.BetConfirmed && p.Bank.ActiveBet > 0, "This player has no confirmed active bet to return.", "Return the active bet to the player's available bank before the hand starts."))
+            UnbetWithUndo(p);
 
         var betKey = p.Identity.ToString();
         customBets.TryGetValue(betKey, out var customBet);
-        ImGui.SetNextItemWidth(150);
-        if (UiHelpers.InputGil($"Custom##custom-bet-{betKey}", ref customBet))
+        ImGui.Spacing();
+        DrawWrappedDisabled("Custom bet");
+        ImGui.SetNextItemWidth(GetResponsiveInputWidth("Bet"));
+        if (UiHelpers.InputGil($"Amount##custom-bet-{betKey}", ref customBet))
             customBets[betKey] = customBet;
-        ImGui.SameLine();
-        if (ImGui.Button($"Bet##bet-{betKey}"))
+        DrawSameLineIfFits("Bet");
+        if (ButtonWithTooltip($"Bet##bet-{betKey}", "Reserve the entered custom amount as this player's bet."))
             ReserveBetWithUndo(p, customBet, "Custom bet");
 
         quickDeposits.TryGetValue(betKey, out var quickDeposit);
-        ImGui.SetNextItemWidth(150);
-        if (UiHelpers.InputGil($"Quick bank add##quick-bank-{betKey}", ref quickDeposit))
+        ImGui.Spacing();
+        DrawWrappedDisabled("Quick bank add");
+        ImGui.SetNextItemWidth(GetResponsiveInputWidth("Add Bank"));
+        if (UiHelpers.InputGil($"Amount##quick-bank-{betKey}", ref quickDeposit))
             quickDeposits[betKey] = quickDeposit;
-        ImGui.SameLine();
-        if (ImGui.Button($"Add Bank##quick-add-bank-{betKey}"))
+        DrawSameLineIfFits("Add Bank");
+        if (ButtonWithTooltip($"Add Bank##quick-add-bank-{betKey}", "Add the entered gil to this player's bank and record it in the dealer ledger as a manual buy-in fallback."))
         {
             players.AddBankDeposit(p, quickDeposit);
+            var dealer = session.SessionPlayers.FirstOrDefault(x => x.Status == PlayerStatus.Dealer) ?? session.SessionPlayers.FirstOrDefault();
+            if (dealer is not null && quickDeposit > 0)
+            {
+                dealerLedger.RecordTrade(new TradeEntry
+                {
+                    From = p.Identity,
+                    To = dealer.Identity,
+                    Amount = quickDeposit,
+                    Classification = TradeClassification.BuyInBankDeposit,
+                    Phase = session.Round.Phase.ToString(),
+                    Note = "Table quick bank add",
+                    Manual = true
+                });
+            }
             log.Add(LogCategory.Trades, $"Quick bank add from Table tab: {p.DisplayName} +{quickDeposit:N0} gil.");
         }
-        UiHelpers.Tooltip("Use this as a live fallback if the client does not expose a trade message for automatic detection.");
         ImGui.Unindent(12f);
     }
 
@@ -254,15 +284,16 @@ public sealed class TableTab
     {
         if (p.Hands.Count == 0)
         {
-            ImGui.TextDisabled("No active hand.");
+            DrawWrappedDisabled("No active hand.");
             return;
         }
 
         ImGui.Indent(12f);
+        DrawControlGroupHeader("Hands");
         foreach (var h in p.Hands)
         {
             var marker = session.Round.Phase == BlackjackPhase.PlayerTurns && session.ActivePlayer == p && session.ActiveHand == h ? "▶ " : "  ";
-            ImGui.Text($"{marker}Hand {h.HandNumber}: {h.CardText} = {h.TotalText} | Bet {h.Bet:N0} | {HandStatus(h)}");
+            DrawWrappedText($"{marker}Hand {h.HandNumber}: {h.CardText} = {h.TotalText} | Bet {h.Bet:N0} | {HandStatus(h)}");
         }
         ImGui.Unindent(12f);
     }
@@ -279,27 +310,108 @@ public sealed class TableTab
         var standEnabled = hitEnabled;
         var standReason = standEnabled ? string.Empty : "Stand is only available for the active unfinished hand.";
         var doubleEnabled = sm.CanDouble(hand, out var doubleReason);
+        var doubleShortfall = GetDoubleDownAdditionalGilNeeded(p, hand);
+        if (!doubleEnabled && doubleShortfall > 0 && IsDoubleDownStructurallyLegal(hand, out _))
+            doubleReason = $"Player needs an additional {doubleShortfall:N0} gil to double down.";
+        var doubleLabel = doubleShortfall > 0 && IsDoubleDownStructurallyLegal(hand, out _)
+            ? $"Double Down (+{doubleShortfall:N0})"
+            : "Double Down";
         var splitEnabled = sm.CanSplit(hand, out var splitReason);
 
         ImGui.Indent(12f);
-        ImGui.TextColored(GambaTheme.Gold, "Active hand actions");
+        DrawControlGroupHeader("Active hand actions");
 
-        if (UiHelpers.DisabledAwareButton("Hit", hitEnabled, hitReason))
-            RequestCard(p, hand, "Hit");
+        if (DisabledButtonWithTooltip("Hit", hitEnabled, hitReason, "Roll one additional card for the active hand."))
+            RequestCard(p, hand, "Hit", undoable: true);
 
-        ImGui.SameLine();
-        if (UiHelpers.DisabledAwareButton("Stand", standEnabled, standReason))
+        DrawSameLineIfFits("Stand");
+        if (DisabledButtonWithTooltip("Stand", standEnabled, standReason, "Complete the active hand without drawing another card."))
             Stand(hand);
 
-        ImGui.SameLine();
-        if (UiHelpers.DisabledAwareButton("Double Down", doubleEnabled, doubleReason))
+        DrawSameLineIfFits(doubleLabel);
+        if (DisabledButtonWithTooltip(doubleLabel, doubleEnabled, doubleReason, doubleShortfall > 0
+                ? $"Player must trade an additional {doubleShortfall:N0} gil before the dealer can complete the Double Down."
+                : "Double the hand wager, roll exactly one more card, then stand."))
             DoubleDown(p, hand);
 
-        ImGui.SameLine();
-        if (UiHelpers.DisabledAwareButton("Split", splitEnabled, splitReason))
+        DrawSameLineIfFits("Split");
+        if (DisabledButtonWithTooltip("Split", splitEnabled, splitReason, "Split a matching pair into two separate hands with an additional matching wager."))
             Split(p, hand);
 
         ImGui.Unindent(12f);
+    }
+
+    private static void DrawControlGroupHeader(string label)
+    {
+        ImGui.Spacing();
+        ImGui.TextColored(GambaTheme.Gold, label);
+    }
+
+    private static bool ButtonWithTooltip(string label, string tooltip)
+    {
+        var clicked = ImGui.Button(label);
+        UiHelpers.Tooltip(tooltip);
+        return clicked;
+    }
+
+    private static bool DisabledButtonWithTooltip(string label, bool enabled, string disabledReason, string enabledTooltip)
+    {
+        if (!enabled)
+            ImGui.BeginDisabled();
+
+        var clicked = ImGui.Button(label);
+
+        if (!enabled)
+        {
+            ImGui.EndDisabled();
+            UiHelpers.Tooltip(disabledReason);
+            return false;
+        }
+
+        UiHelpers.Tooltip(enabledTooltip);
+        return clicked;
+    }
+
+    private static void DrawSameLineIfFits(string nextLabel)
+    {
+        var visibleLabel = VisibleLabel(nextLabel);
+        var style = ImGui.GetStyle();
+        var nextWidth = ImGui.CalcTextSize(visibleLabel).X + style.FramePadding.X * 2f;
+        var rightEdgeIfSameLine = ImGui.GetItemRectMax().X + style.ItemSpacing.X + nextWidth;
+        var contentRight = ImGui.GetWindowPos().X + ImGui.GetWindowContentRegionMax().X;
+        if (rightEdgeIfSameLine <= contentRight)
+            ImGui.SameLine();
+    }
+
+    private static float GetResponsiveInputWidth(string nextButtonLabel)
+    {
+        var style = ImGui.GetStyle();
+        var buttonWidth = ImGui.CalcTextSize(VisibleLabel(nextButtonLabel)).X + style.FramePadding.X * 2f;
+        var available = ImGui.GetContentRegionAvail().X;
+        var inlineWidth = available - buttonWidth - style.ItemSpacing.X;
+        if (inlineWidth >= 150f)
+            return Math.Min(220f, inlineWidth);
+        return Math.Max(150f, Math.Min(220f, available));
+    }
+
+    private static string VisibleLabel(string label)
+    {
+        var marker = label.IndexOf("##", StringComparison.Ordinal);
+        return marker >= 0 ? label[..marker] : label;
+    }
+
+    private static void DrawWrappedDisabled(string text)
+    {
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + Math.Max(180f, ImGui.GetContentRegionAvail().X));
+        ImGui.TextDisabled(text);
+        ImGui.PopTextWrapPos();
+    }
+
+    private static void DrawWrappedText(string text)
+    {
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + Math.Max(180f, ImGui.GetContentRegionAvail().X));
+        ImGui.TextWrapped(text);
+        ImGui.PopTextWrapPos();
     }
 
     private bool IsActiveUnfinishedHand(PlayerSessionState player, BlackjackHand hand)
@@ -328,7 +440,7 @@ public sealed class TableTab
         var beforeActive = p.Bank.ActiveBet;
         var beforeLastBet = p.Bank.LastBet;
         var beforeConfirmed = p.BetConfirmed;
-        var beforeHands = p.Hands.Select(CloneHand).ToList();
+        var beforeHands = p.Hands.Select(TableTab.CloneHand).ToList();
 
         if (!players.TryReserveBet(p, amount, out var reason))
         {
@@ -345,8 +457,22 @@ public sealed class TableTab
             p.Bank.LastBet = beforeLastBet;
             p.BetConfirmed = beforeConfirmed;
             p.Hands.Clear();
-            p.Hands.AddRange(beforeHands.Select(CloneHand));
+            p.Hands.AddRange(beforeHands.Select(TableTab.CloneHand));
         });
+    }
+
+    private void UnbetWithUndo(PlayerSessionState p)
+    {
+        var before = CaptureSnapshot();
+        var amount = p.Bank.ActiveBet;
+        p.Bank.Available += p.Bank.ActiveBet;
+        p.Bank.ActiveBet = 0;
+        p.BetConfirmed = false;
+        p.Hands.Clear();
+        p.Status = PlayerStatus.SittingOut;
+        log.Add(LogCategory.RoundFlow, $"Returned {amount:N0} gil active bet to {p.DisplayName}; bet is no longer confirmed.");
+        chat.EnqueueParty($"{p.DisplayName}'s bet has been returned before the hand starts. Bank: {p.Bank.Available:N0} gil.");
+        undo.Push($"Unbet {p.DisplayName}", () => RestoreSnapshot(before));
     }
 
 
@@ -369,6 +495,7 @@ public sealed class TableTab
 
     private void StartDealing()
     {
+        var before = CaptureSnapshot();
         dealerTurnStarted = false;
         allBustRoundOverAnnounced = false;
         chat.EnqueueParty("Bets closed. Dealing next round.");
@@ -403,6 +530,7 @@ public sealed class TableTab
 
             RequestDealerCard("Dealer visible card", CountInitialDealCardResolved, continueDealerTurn: false);
             log.Add(LogCategory.RoundFlow, "Started full-hand initial deal using visible /dice results.");
+            undo.Push("Start dealing", () => RestoreSnapshot(before));
             return;
         }
 
@@ -418,6 +546,7 @@ public sealed class TableTab
             RequestCard(p, p.Hands[0], "Initial card 2", CountInitialDealCardResolved);
 
         log.Add(LogCategory.RoundFlow, "Started round-robin initial deal using visible /dice results.");
+        undo.Push("Start dealing", () => RestoreSnapshot(before));
     }
 
     private static void NormalizePrimaryHandForNewDeal(PlayerSessionState player)
@@ -536,8 +665,9 @@ public sealed class TableTab
         BeginDealerTurnIfReady();
     }
 
-    private void RequestCard(PlayerSessionState p, BlackjackHand hand, string reason, Action? afterApply = null)
+    private void RequestCard(PlayerSessionState p, BlackjackHand hand, string reason, Action? afterApply = null, bool undoable = false)
     {
+        var before = undoable ? CaptureSnapshot() : null;
         dice.RequestRoll($"{reason} for {p.DisplayName} Hand {hand.HandNumber}", c =>
         {
             hand.AddCard(c);
@@ -578,27 +708,27 @@ public sealed class TableTab
                 AnnounceActivePlayerTurn();
             }
         });
+
+        if (before is not null)
+            undo.Push($"{reason} for {p.DisplayName} hand {hand.HandNumber}", () => RestoreSnapshot(before));
     }
 
     private void Stand(BlackjackHand hand)
     {
-        var beforeComplete = hand.IsComplete;
-        var beforeActions = hand.Actions.ToList();
-        undo.Push($"Stand hand {hand.HandNumber}", () =>
-        {
-            hand.IsComplete = beforeComplete;
-            hand.Actions.Clear();
-            hand.Actions.AddRange(beforeActions);
-        });
+        var before = CaptureSnapshot();
+        var previousPlayer = session.ActivePlayer;
+        var previousHand = session.ActiveHand;
 
         hand.IsComplete = true;
         hand.Actions.Add("Stand");
         chat.EnqueueParty($"{session.ActivePlayer?.DisplayName ?? "Player"} stands on {hand.TotalText}.");
-        var previousPlayer = session.ActivePlayer;
         new BlackjackStateMachine(session).AdvanceToNextHand();
-        if (session.Round.Phase == BlackjackPhase.PlayerTurns && session.ActivePlayer is not null && session.ActivePlayer != previousPlayer)
+        if (session.Round.Phase == BlackjackPhase.PlayerTurns && session.ActivePlayer is not null
+            && (session.ActivePlayer != previousPlayer || session.ActiveHand != previousHand))
             AnnounceActivePlayerTurn();
         BeginDealerTurnIfReady();
+
+        undo.Push($"Stand hand {hand.HandNumber}", () => RestoreSnapshot(before));
     }
 
     private void DoubleDown(PlayerSessionState p, BlackjackHand hand)
@@ -606,33 +736,123 @@ public sealed class TableTab
         var sm = new BlackjackStateMachine(session);
         if (!sm.CanDouble(hand, out var r)) { log.Add(LogCategory.Warnings, r); return; }
 
+        var before = CaptureSnapshot();
+
         if (hand.OriginalBet <= 0)
             hand.OriginalBet = hand.Bet;
 
-        p.Bank.Available -= hand.Bet;
-        p.Bank.ActiveBet += hand.Bet;
-        hand.Bet *= 2;
+        var additionalBet = hand.Bet;
+        p.Bank.Available -= additionalBet;
+        p.Bank.ActiveBet += additionalBet;
+        hand.Bet += additionalBet;
         hand.IsDoubled = true;
+        chat.EnqueueParty($"{p.DisplayName} doubles down. Additional wager: {additionalBet:N0} gil. Total hand bet: {hand.Bet:N0} gil.");
+        log.Add(LogCategory.RoundFlow, $"Double Down reserved an additional {additionalBet:N0} gil for {p.DisplayName}.");
         RequestCard(p, hand, "Double Down", () => hand.IsComplete = true);
+        undo.Push($"Double Down for {p.DisplayName} hand {hand.HandNumber}", () => RestoreSnapshot(before));
     }
 
     private void Split(PlayerSessionState p, BlackjackHand hand)
     {
         var sm = new BlackjackStateMachine(session);
         if (!sm.CanSplit(hand, out var r)) { log.Add(LogCategory.Warnings, r); return; }
+
+        var before = CaptureSnapshot();
+
         if (hand.OriginalBet <= 0)
             hand.OriginalBet = hand.Bet;
 
         var card = hand.Cards[1];
         hand.Cards.RemoveAt(1);
+        hand.IsComplete = false;
+        hand.IsBusted = false;
+        hand.IsSplitHand = true;
+
         var newHand = new BlackjackHand { HandNumber = p.Hands.Count + 1, Bet = hand.Bet, OriginalBet = hand.OriginalBet, IsSplitHand = true };
         newHand.Cards.Add(card);
-        hand.IsSplitHand = true;
+
         p.Bank.Available -= hand.Bet;
         p.Bank.ActiveBet += hand.Bet;
         p.Hands.Add(newHand);
-        log.Add(LogCategory.RoundFlow, $"Split {p.DisplayName} hand.");
+
+        log.Add(LogCategory.RoundFlow, $"Split {p.DisplayName} hand into Hand {hand.HandNumber} and Hand {newHand.HandNumber}.");
+        chat.EnqueueParty($"{p.DisplayName} splits {hand.Cards[0]} + {card}. Additional split wager: {hand.Bet:N0} gil.");
+        undo.Push($"Split {p.DisplayName} hand {hand.HandNumber}", () => RestoreSnapshot(before));
+
+        RequestSplitCompletionCards(p, hand, newHand);
+    }
+
+    private void RequestSplitCompletionCards(PlayerSessionState player, BlackjackHand firstHand, BlackjackHand secondHand)
+    {
+        var remaining = 2;
+
+        void ApplySplitCard(BlackjackHand targetHand, BlackjackCard card)
+        {
+            targetHand.AddCard(card);
+            if (session.Rules.SplitAcesOneCardOnly && targetHand.IsSplitHand && targetHand.Cards.Any(c => c.IsAce))
+                targetHand.IsComplete = true;
+            targetHand.Actions.Add($"Split hand {targetHand.HandNumber} card");
+            chat.EnqueueParty($"{player.DisplayName} receives {card} for Hand {targetHand.HandNumber}. Hand: {targetHand.CardText} = {targetHand.TotalText}.");
+            if (targetHand.IsBusted)
+                chat.EnqueueParty($"{player.DisplayName} Hand {targetHand.HandNumber} busts with {targetHand.BestTotal}.");
+
+            remaining--;
+            if (remaining > 0)
+                return;
+
+            if (session.Round.Phase == BlackjackPhase.PlayerTurns)
+            {
+                if (session.ActiveHand is { IsComplete: true })
+                    new BlackjackStateMachine(session).AdvanceToNextHand();
+
+                if (session.Round.Phase == BlackjackPhase.PlayerTurns && session.ActivePlayer is not null)
+                    AnnounceActivePlayerTurn();
+
+                BeginDealerTurnIfReady();
+            }
+        }
+
+        dice.RequestRoll($"Split completion card for {player.DisplayName} Hand {firstHand.HandNumber}", c => ApplySplitCard(firstHand, c));
+        dice.RequestRoll($"Split completion card for {player.DisplayName} Hand {secondHand.HandNumber}", c => ApplySplitCard(secondHand, c));
+    }
+
+    private void RebroadcastCurrentTurnAndDealer()
+    {
+        if (session.Round.Phase != BlackjackPhase.PlayerTurns || session.ActivePlayer is not { } player || session.ActiveHand is not { } hand)
+        {
+            log.Add(LogCategory.Warnings, "No active player turn is available to rebroadcast.");
+            return;
+        }
+
+        chat.EnqueueParty($"Current turn: {player.DisplayName} Hand {hand.HandNumber}: {hand.CardText} = {hand.TotalText}. Bet: {hand.Bet:N0} gil.");
+        chat.EnqueueParty($"Dealer showing: {session.Round.DealerHand.CardText} = {session.Round.DealerHand.TotalText}.");
         AnnounceActivePlayerTurn();
+        log.Add(LogCategory.ChatQueue, $"Rebroadcast current turn for {player.DisplayName} Hand {hand.HandNumber}.");
+    }
+
+    private void RebroadcastCurrentBanks()
+    {
+        // Include every non-dealer tracked at the table, including players who
+        // have cashed out to 0 gil. The old filter skipped CashedOut players,
+        // which made the button look like it stopped working after a dealer
+        // paid a player's bank back to 0.
+        var entries = session.SessionPlayers
+            .Where(p => p.Status != PlayerStatus.Dealer)
+            .OrderBy(p => p.PartySlot)
+            .Select(p => $"{p.DisplayName}: {p.Bank.Available:N0} gil")
+            .ToList();
+
+        if (entries.Count == 0)
+        {
+            log.Add(LogCategory.Warnings, "No player banks are available to rebroadcast.");
+            return;
+        }
+
+        const int maxPerMessage = 3;
+        for (var i = 0; i < entries.Count; i += maxPerMessage)
+            chat.EnqueueParty("Current banks: " + string.Join(" | ", entries.Skip(i).Take(maxPerMessage)));
+
+        log.Add(LogCategory.ChatQueue, $"Rebroadcast current player banks for {entries.Count} tracked player(s).");
     }
 
     private void AnnounceActivePlayerTurn()
@@ -641,18 +861,42 @@ public sealed class TableTab
             return;
 
         var options = BuildLegalOptions(hand);
+        var handLabel = GetHandLabel(player, hand);
         var message = ApplyTemplate("PlayerTurnOptions", new Dictionary<string, string>
         {
             ["player"] = player.DisplayName,
             ["hand"] = hand.CardText,
+            ["handLabel"] = handLabel,
             ["total"] = hand.TotalText,
             ["bet"] = hand.Bet.ToString("N0"),
             ["bank"] = player.Bank.Available.ToString("N0"),
             ["options"] = options,
         });
 
+        message = ApplySplitHandLabelFallback(message, handLabel);
+
         chat.EnqueueParty(message);
-        log.Add(LogCategory.RoundFlow, $"Turn options for {player.DisplayName}: {options}.");
+        log.Add(LogCategory.RoundFlow, $"Turn options for {player.DisplayName} {handLabel}: {options}.");
+    }
+
+    private static string GetHandLabel(PlayerSessionState player, BlackjackHand hand)
+    {
+        var activeHandCount = player.Hands.Count(h => !h.IsVoided && h.Cards.Count > 0);
+        return hand.IsSplitHand || activeHandCount > 1 ? $"Hand {hand.HandNumber}" : "Hand";
+    }
+
+    private static string ApplySplitHandLabelFallback(string message, string handLabel)
+    {
+        if (string.Equals(handLabel, "Hand", StringComparison.OrdinalIgnoreCase))
+            return message;
+
+        // Existing venue templates may still contain literal text like "Hand:" instead
+        // of the new {handLabel} variable. Rewrite that common default wording so
+        // split prompts clearly say Hand 1 / Hand 2 without forcing users to reset
+        // their saved chat templates.
+        return message
+            .Replace("Current hand:", $"{handLabel}:", StringComparison.OrdinalIgnoreCase)
+            .Replace("Hand:", $"{handLabel}:", StringComparison.OrdinalIgnoreCase);
     }
 
     private string BuildLegalOptions(BlackjackHand hand)
@@ -670,11 +914,54 @@ public sealed class TableTab
         }
 
         if (sm.CanDouble(hand, out _))
-            options.Add("Double");
+        {
+            options.Add("Double Down");
+        }
+        else if (session.ActivePlayer is { } player && IsDoubleDownStructurallyLegal(hand, out _)
+                 && GetDoubleDownAdditionalGilNeeded(player, hand) is var needed && needed > 0)
+        {
+            options.Add($"Double Down with additional {needed:N0} gil");
+        }
+
         if (sm.CanSplit(hand, out _))
             options.Add("Split");
 
         return options.Count == 0 ? "No legal actions" : string.Join(", ", options);
+    }
+
+    private bool IsDoubleDownStructurallyLegal(BlackjackHand hand, out string reason)
+    {
+        reason = string.Empty;
+        if (session.Round.Phase != BlackjackPhase.PlayerTurns || session.ActiveHand != hand || hand.IsComplete)
+        {
+            reason = "Double Down is only available for the active unfinished hand.";
+            return false;
+        }
+
+        if (hand.Cards.Count != 2)
+        {
+            reason = "Double Down is only available on the first two cards by default.";
+            return false;
+        }
+
+        if (hand.IsSplitHand && !session.Rules.DoubleAfterSplit)
+        {
+            reason = "Rules disable Double Down on split hands.";
+            return false;
+        }
+
+        if (session.Rules.DoubleOnlyOnNineTenEleven && hand.BestTotal is not (9 or 10 or 11))
+        {
+            reason = "Rules restrict Double Down to totals of 9, 10, or 11.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static long GetDoubleDownAdditionalGilNeeded(PlayerSessionState player, BlackjackHand hand)
+    {
+        return Math.Max(0, hand.Bet - player.Bank.Available);
     }
 
     private string ApplyTemplate(string key, IReadOnlyDictionary<string, string> values)
@@ -816,7 +1103,9 @@ public sealed class TableTab
             {
                 var entry = settlement.Settle(p, h, session.Round.DealerHand, session.Round.RoundNumber);
                 p.RoundHistory.Add(entry);
-                chat.EnqueueParty($"{p.DisplayName}: {h.Bet:N0} gil bet, {h.CardText} vs dealer {session.Round.DealerHand.CardText} → {entry.Outcome}. Bank: {p.Bank.Available:N0} gil.");
+                dealerLedger.ApplySettlement(entry);
+                chat.EnqueueParty($"{p.DisplayName} {GetHandLabel(p, h)}: {h.Bet:N0} gil bet, {h.CardText} vs dealer {session.Round.DealerHand.CardText} → {entry.Outcome}. Return: {entry.TotalReturn:N0} gil. Bank: {p.Bank.Available:N0} gil.");
+                log.Add(LogCategory.RoundFlow, $"Settled {p.DisplayName} {GetHandLabel(p, h)}: outcome {entry.Outcome}, wager {entry.Bet:N0}, return {entry.TotalReturn:N0}, player delta {entry.PlayerDelta:N0}.");
             }
         }
         session.Round.RoundNumber++;
@@ -828,6 +1117,118 @@ public sealed class TableTab
         {
             p.BetConfirmed = false;
             p.Hands.Clear();
+        }
+    }
+
+    private TableSnapshot CaptureSnapshot()
+        => new()
+        {
+            RoundNumber = session.Round.RoundNumber,
+            Phase = session.Round.Phase,
+            DealerHand = CloneHand(session.Round.DealerHand),
+            ActivePlayerIndex = session.Round.ActivePlayerIndex,
+            ActiveHandIndex = session.Round.ActiveHandIndex,
+            RoundPlayerIdentities = session.Round.Players.Select(p => p.Identity).ToList(),
+            PlayerSnapshots = session.SessionPlayers.Select(PlayerSnapshot.From).ToList(),
+            PendingInitialDealCards = pendingInitialDealCards,
+            DealerTurnStarted = dealerTurnStarted,
+            AllBustRoundOverAnnounced = allBustRoundOverAnnounced
+        };
+
+    private void RestoreSnapshot(TableSnapshot snapshot)
+    {
+        dice.ClearPendingAndQueued();
+
+        foreach (var playerSnapshot in snapshot.PlayerSnapshots)
+        {
+            var player = session.SessionPlayers.FirstOrDefault(p => p.Identity.Equals(playerSnapshot.Identity));
+            if (player is null)
+            {
+                player = new PlayerSessionState { Identity = playerSnapshot.Identity };
+                session.SessionPlayers.Add(player);
+            }
+
+            playerSnapshot.ApplyTo(player);
+        }
+
+        session.SessionPlayers.RemoveAll(p => snapshot.PlayerSnapshots.All(s => !s.Identity.Equals(p.Identity)));
+
+        session.Round.RoundNumber = snapshot.RoundNumber;
+        session.Round.Phase = snapshot.Phase;
+        session.Round.DealerHand = CloneHand(snapshot.DealerHand);
+        session.Round.ActivePlayerIndex = snapshot.ActivePlayerIndex;
+        session.Round.ActiveHandIndex = snapshot.ActiveHandIndex;
+        session.Round.Players = snapshot.RoundPlayerIdentities
+            .Select(id => session.SessionPlayers.FirstOrDefault(p => p.Identity.Equals(id)))
+            .Where(p => p is not null)
+            .Select(p => p!)
+            .ToList();
+
+        pendingInitialDealCards = snapshot.PendingInitialDealCards;
+        dealerTurnStarted = snapshot.DealerTurnStarted;
+        allBustRoundOverAnnounced = snapshot.AllBustRoundOverAnnounced;
+
+        log.Add(LogCategory.Undo, "Blackjack table state restored to the previous action.");
+    }
+
+    private sealed class TableSnapshot
+    {
+        public int RoundNumber { get; init; }
+        public BlackjackPhase Phase { get; init; }
+        public BlackjackHand DealerHand { get; init; } = new() { HandNumber = 0 };
+        public int ActivePlayerIndex { get; init; }
+        public int ActiveHandIndex { get; init; }
+        public List<PlayerIdentity> RoundPlayerIdentities { get; init; } = [];
+        public List<PlayerSnapshot> PlayerSnapshots { get; init; } = [];
+        public int PendingInitialDealCards { get; init; }
+        public bool DealerTurnStarted { get; init; }
+        public bool AllBustRoundOverAnnounced { get; init; }
+    }
+
+    private sealed class PlayerSnapshot
+    {
+        public PlayerIdentity Identity { get; init; }
+        public int PartySlot { get; init; }
+        public PlayerStatus Status { get; init; }
+        public long Available { get; init; }
+        public long ActiveBet { get; init; }
+        public long LastTradeAmount { get; init; }
+        public long LastBet { get; init; }
+        public bool HasUnpaidBalance { get; init; }
+        public long UnpaidBalance { get; init; }
+        public bool BetConfirmed { get; init; }
+        public List<BlackjackHand> Hands { get; init; } = [];
+
+        public static PlayerSnapshot From(PlayerSessionState player)
+            => new()
+            {
+                Identity = player.Identity,
+                PartySlot = player.PartySlot,
+                Status = player.Status,
+                Available = player.Bank.Available,
+                ActiveBet = player.Bank.ActiveBet,
+                LastTradeAmount = player.Bank.LastTradeAmount,
+                LastBet = player.Bank.LastBet,
+                HasUnpaidBalance = player.Bank.HasUnpaidBalance,
+                UnpaidBalance = player.Bank.UnpaidBalance,
+                BetConfirmed = player.BetConfirmed,
+                Hands = player.Hands.Select(TableTab.CloneHand).ToList()
+            };
+
+        public void ApplyTo(PlayerSessionState player)
+        {
+            player.Identity = Identity;
+            player.PartySlot = PartySlot;
+            player.Status = Status;
+            player.Bank.Available = Available;
+            player.Bank.ActiveBet = ActiveBet;
+            player.Bank.LastTradeAmount = LastTradeAmount;
+            player.Bank.LastBet = LastBet;
+            player.Bank.HasUnpaidBalance = HasUnpaidBalance;
+            player.Bank.UnpaidBalance = UnpaidBalance;
+            player.BetConfirmed = BetConfirmed;
+            player.Hands.Clear();
+            player.Hands.AddRange(Hands.Select(TableTab.CloneHand));
         }
     }
 

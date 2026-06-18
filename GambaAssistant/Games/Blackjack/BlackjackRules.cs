@@ -10,7 +10,7 @@ public sealed class BlackjackRules : IGameRuleset
     public long MaximumBet { get; set; } = 500_000;
     public string DiceCommand { get; set; } = "/dice party 13";
     public int DiceSides { get; set; } = 13;
-    public BlackjackInitialDealMode InitialDealMode { get; set; } = BlackjackInitialDealMode.RoundRobin;
+    public BlackjackInitialDealMode InitialDealMode { get; set; } = BlackjackInitialDealMode.PlayerFullHandsThenDealer;
     public BlackjackPayout NaturalBlackjackPayout { get; set; } = BlackjackPayout.Custom;
     public bool DealerStandsOnSoft17 { get; set; } = true;
     public bool PushOnTie { get; set; } = true;

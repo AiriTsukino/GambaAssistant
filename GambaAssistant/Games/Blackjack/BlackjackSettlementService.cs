@@ -29,7 +29,8 @@ public sealed class BlackjackSettlementService
         // Active bet was already reserved from available bank. Return exactly the
         // configured total payout. Double-down pushes therefore return both the
         // initial and DD stakes, while losses keep the full wager removed.
-        player.Bank.ActiveBet -= wager;
+        var playerDelta = totalReturn - wager;
+        player.Bank.ActiveBet = Math.Max(0, player.Bank.ActiveBet - wager);
         if (totalReturn > 0)
             player.Bank.Available += totalReturn;
 
@@ -40,6 +41,8 @@ public sealed class BlackjackSettlementService
             DealerCards = dealer.CardText,
             PlayerCards = hand.CardText,
             Bet = hand.Bet,
+            TotalReturn = totalReturn,
+            PlayerDelta = playerDelta,
             Actions = string.Join(", ", hand.Actions),
             Outcome = outcome.ToString(),
             BankAfter = player.Bank.Available

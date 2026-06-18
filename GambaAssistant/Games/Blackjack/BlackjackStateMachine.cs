@@ -62,7 +62,7 @@ public sealed class BlackjackStateMachine : IGameStateMachine
         var match = session.Rules.SplitByExactRank ? hand.CanSplitByExactRank : hand.CanSplitByValue;
         if (!match) { reason = session.Rules.SplitByExactRank ? "Cards must match by exact rank." : "Cards must match by value."; return false; }
         var player = session.ActivePlayer;
-        if (player == null || player.Hands.Count >= session.Rules.MaxSplitHands) { reason = "Maximum split hands reached."; return false; }
+        if (player == null || player.Hands.Count(h => !h.IsVoided && h.Cards.Count > 0) >= session.Rules.MaxSplitHands) { reason = "Maximum split hands reached."; return false; }
         if (player.Bank.Available < hand.Bet) { reason = "Player needs enough available bank for the extra split bet."; return false; }
         return true;
     }

@@ -24,6 +24,7 @@ public sealed class MainWindow : Window
     private readonly OverlaySettingsTab overlaySettings;
     private readonly DeathRollTournamentTab deathRoll;
     private readonly Action openSettings;
+    private readonly Configuration config;
     private int selectedTab;
     private int selectedBlackjackTab;
     private int selectedDrtTab;
@@ -32,9 +33,10 @@ public sealed class MainWindow : Window
         : base("GambaAssistant###GambaAssistantMainWindow", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoFocusOnAppearing)
     {
         this.openSettings = openSettings;
+        this.config = config;
         SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(900, 620), MaximumSize = new Vector2(float.MaxValue, float.MaxValue) };
-        table = new TableTab(config, session, profiles, party, playerService, ledgerService, dice, chat, undo, log, openSettings);
-        players = new PlayersTab(session, playerService);
+        table = new TableTab(config, session, profiles, party, playerService, ledgerService, dice, chat, undo, log);
+        players = new PlayersTab(session, playerService, ledgerService);
         ledger = new DealerLedgerTab(ledgerService);
         rules = new RulesTab(session, profiles);
         trades = new TradeMonitorTab(session, tradeMonitor);
@@ -189,14 +191,32 @@ public sealed class MainWindow : Window
         const string settingsLabel = "Settings##gamba-main-top-settings";
         const float buttonGap = 8f;
         const float settingsWidth = 94f;
+        const float enableOverlayWidth = 128f;
+        const float compactOverlayWidth = 142f;
 
         var supportWidth = MathF.Max(116f, ImGui.CalcTextSize("Support").X + 52f);
-        var totalWidth = settingsWidth + buttonGap + supportWidth;
+        var totalWidth = enableOverlayWidth + buttonGap + compactOverlayWidth + buttonGap + settingsWidth + buttonGap + supportWidth;
 
         ImGui.SameLine();
         var available = ImGui.GetContentRegionAvail().X;
         if (available > totalWidth + 8f)
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + available - totalWidth);
+
+        var overlayEnabled = config.Overlay.Enabled;
+        if (ImGui.Checkbox("Enable overlay##gamba-top-enable-overlay", ref overlayEnabled))
+            config.Overlay.Enabled = overlayEnabled;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Turns the Blackjack overlay window on or off.");
+
+        ImGui.SameLine(0f, buttonGap);
+
+        var compactOverlay = config.Overlay.Compact;
+        if (ImGui.Checkbox("Compact overlay##gamba-top-compact-overlay", ref compactOverlay))
+            config.Overlay.Compact = compactOverlay;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Uses the smaller Blackjack overlay layout for crowded screens.");
+
+        ImGui.SameLine(0f, buttonGap);
 
         if (ImGui.Button(settingsLabel, new Vector2(settingsWidth, 0)))
             openSettings();

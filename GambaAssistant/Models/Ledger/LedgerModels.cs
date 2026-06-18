@@ -47,6 +47,8 @@ public sealed class RoundHistoryEntry
     public string DealerCards { get; set; } = string.Empty;
     public string PlayerCards { get; set; } = string.Empty;
     public long Bet { get; set; }
+    public long TotalReturn { get; set; }
+    public long PlayerDelta { get; set; }
     public string Actions { get; set; } = string.Empty;
     public string Outcome { get; set; } = string.Empty;
     public long BankAfter { get; set; }

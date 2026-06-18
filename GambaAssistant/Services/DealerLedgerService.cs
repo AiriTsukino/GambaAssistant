@@ -11,6 +11,22 @@ public sealed class DealerLedgerService
     public DealerLedgerService(BlackjackSession session, LogService log) { this.session = session; this.log = log; }
     public DealerLedger Ledger => session.DealerLedger;
 
+    public long OutstandingPlayerBanks => session.SessionPlayers
+        .Where(p => p.Status != PlayerStatus.Dealer)
+        .Sum(p => p.Bank.TotalTracked);
+
+    public long LiveGameProfitLoss => Ledger.TotalBuyInsDeposits - Ledger.TotalCashOuts - OutstandingPlayerBanks;
+
+    public long ExpectedDealerGil => Ledger.StartingGil
+        + LiveGameProfitLoss
+        + Ledger.DealerTips
+        + Ledger.VenueTips
+        + Ledger.MiscAdjustments;
+
+    public long? Difference => Ledger.ActualEndingGil.HasValue
+        ? Ledger.ActualEndingGil.Value - ExpectedDealerGil
+        : null;
+
     public void RecordTrade(TradeEntry entry)
     {
         Ledger.Trades.Add(entry);
@@ -22,6 +38,19 @@ public sealed class DealerLedgerService
             case TradeClassification.VenueTip: Ledger.VenueTips += entry.Amount; break;
         }
         log.Add(LogCategory.Trades, $"{entry.From.Display} → {entry.To.Display}: {entry.Amount:N0} gil | {entry.Phase} | {entry.Classification}");
+    }
+
+    public void ApplySettlement(RoundHistoryEntry entry)
+    {
+        // PlayerDelta is the net movement in the player bank for this individual
+        // hand after the reserved wager is resolved. Apply every hand separately so
+        // split hands, double-downs, pushes, and naturals reconcile correctly.
+        Ledger.GameProfitLoss -= entry.PlayerDelta;
+
+        if (entry.PlayerDelta > 0)
+            Ledger.TotalPayouts += entry.TotalReturn;
+        else if (entry.PlayerDelta < 0)
+            Ledger.TotalBets += entry.Bet;
     }
 
     public void ApplySettlementDelta(long playerDelta)

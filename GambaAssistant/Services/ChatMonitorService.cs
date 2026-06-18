@@ -28,6 +28,7 @@ public sealed class ChatMonitorService : IDisposable
     private static readonly Regex NameBeforeRollRegex = new(@"(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:rolls?|rolled)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex IncomingTradeWithNameRegex = new(@"(?:(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:trades|gives|gave|pays|paid)\s+(?:you\s+)?(?<amount>[\d,]+)\s+gil|you\s+(?:receive|received|have\s+received|obtain|obtained|gain|gained)\s+(?<amount2>[\d,]+)\s+gil\s+from\s+(?<name2>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?))", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex IncomingTradeAmountOnlyRegex = new(@"\b(?:you\s+)?(?:receive|received|have\s+received|obtain|obtained|gain|gained)\s+(?<amount>[\d,]+)\s+gil\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex OutgoingTradeWithNameRegex = new(@"\byou\s+(?:hand\s+over|gave|give|trade|traded|pay|paid)\s+(?<amount>[\d,]+)\s+gil\s+(?:to\s+)?(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex OutgoingTradeAmountOnlyRegex = new(@"\b(?:you\s+)?(?:hand\s+over|gave|give|trade|traded|pay|paid)\s+(?<amount>[\d,]+)\s+gil\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex TradeRequestRegex = new(@"\b(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:wishes|wants|would\s+like)\s+to\s+trade\s+with\s+you\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex OutgoingTradeRequestRegex = new(@"\btrade\s+request\s+sent\s+to\s+(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -353,10 +354,19 @@ public sealed class ChatMonitorService : IDisposable
             }
         }
 
-        // Outgoing cash-out lines are amount-only in the client log, for example:
-        // "You hand over 50,000 gil." Attribute them to the active outgoing
-        // trade recipient captured from "Trade request sent to Player". During
-        // CashOutBetweenHands, this immediately lowers that player's tracked bank.
+        var outgoingNamedMatch = OutgoingTradeWithNameRegex.Match(combined);
+        if (outgoingNamedMatch.Success && TryParseGilAmount(outgoingNamedMatch.Groups["amount"].Value, out var outgoingNamedAmount))
+        {
+            trades.AddDetectedOutgoingTrade(outgoingNamedMatch.Groups["name"].Value, outgoingNamedAmount, "Detected named outgoing gil trade from chat/log text");
+            pendingTradePlayerName = null;
+            pendingTradeLastAmount = outgoingNamedAmount;
+            return;
+        }
+
+        // Outgoing cash-out lines are often amount-only in the client log, for
+        // example: "You hand over 50,000 gil." Attribute them to the active
+        // outgoing trade recipient captured from the trade request/confirmation
+        // sequence, regardless of Blackjack phase.
         var outgoingAmountOnlyMatch = OutgoingTradeAmountOnlyRegex.Match(combined);
         if (outgoingAmountOnlyMatch.Success && TryParseGilAmount(outgoingAmountOnlyMatch.Groups["amount"].Value, out var outgoingAmountOnly))
         {

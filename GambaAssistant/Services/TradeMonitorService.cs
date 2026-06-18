@@ -10,7 +10,7 @@ public sealed class TradeMonitorService
     private readonly DealerLedgerService ledger;
     private readonly LogService log;
     public List<TradeEntry> Trades { get; } = [];
-    public string DetectionStatus { get; private set; } = "Trade detection listens for visible client trade/chat log text when available. Because gil trade packets are not guaranteed through stable Dalamud APIs, manual entry remains available and bank-affecting classifications are logged.";
+    public string DetectionStatus { get; private set; } = "Trade detection listens for visible client trade/chat log text and applies incoming gil as bank deposits and outgoing gil as cash-outs at any time. Manual entry remains available as a fallback when the client does not expose a stable trade line.";
     public TradeMonitorService(BlackjackSession session, DealerLedgerService ledger, LogService log) { this.session = session; this.ledger = ledger; this.log = log; }
 
     public TradeEntry AddManualTrade(PlayerIdentity from, PlayerIdentity to, long amount, TradeClassification classification, string note = "Manual entry")
@@ -27,11 +27,10 @@ public sealed class TradeMonitorService
             return AddTrade(unknown, PlayerIdentity.UnknownDealer(), amount, TradeClassification.NeedsReview, note, manual: false);
         }
 
-        var classification = session.Round.Phase is BlackjackPhase.Idle or BlackjackPhase.BettingOpen or BlackjackPhase.CashOutBetweenHands
-            ? TradeClassification.BuyInBankDeposit
-            : TradeClassification.NeedsReview;
-
-        return AddTrade(player.Identity, dealer.Identity, amount, classification, note, manual: false);
+        // 0.1.81: keep trade detection phase-independent. Incoming gil always
+        // increases the player's bank so buy-ins, re-buys, and double-down
+        // top-ups can be handled whenever they happen.
+        return AddTrade(player.Identity, dealer.Identity, amount, TradeClassification.BuyInBankDeposit, note, manual: false);
     }
 
 
@@ -46,14 +45,10 @@ public sealed class TradeMonitorService
             return AddTrade(PlayerIdentity.UnknownDealer(), unknown, amount, TradeClassification.NeedsReview, note, manual: false);
         }
 
-        var classification = session.Round.Phase is BlackjackPhase.Idle or BlackjackPhase.CashOutBetweenHands
-            ? TradeClassification.CashOut
-            : TradeClassification.NeedsReview;
-
-        if (classification == TradeClassification.NeedsReview)
-            log.Add(LogCategory.Warnings, $"Detected outgoing gil trade to {player.DisplayName} for {amount:N0} gil during {session.Round.Phase}; left as NeedsReview instead of lowering bank because cash-outs only auto-apply while idle or between hands.");
-
-        return AddTrade(dealer.Identity, player.Identity, amount, classification, note, manual: false);
+        // 0.1.81: outgoing gil is a cash-out whenever it is detected. This lets
+        // players cash out mid-round or between hands without phase-specific
+        // bookkeeping blocking the bank update.
+        return AddTrade(dealer.Identity, player.Identity, amount, TradeClassification.CashOut, note, manual: false);
     }
 
     public void Reclassify(TradeEntry entry, TradeClassification classification, string note)
@@ -96,7 +91,7 @@ public sealed class TradeMonitorService
                 {
                     depositor.Bank.Available += entry.Amount;
                     depositor.Bank.LastTradeAmount = entry.Amount;
-                    if (depositor.Status == PlayerStatus.SittingOut)
+                    if (depositor.Status is PlayerStatus.SittingOut or PlayerStatus.CashedOut or PlayerStatus.LeftDisconnected)
                         depositor.Status = PlayerStatus.Playing;
                     log.Add(LogCategory.Trades, $"Bank deposit applied: {depositor.DisplayName} +{entry.Amount:N0} gil.");
                 }

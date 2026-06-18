@@ -11,9 +11,10 @@ public sealed class PlayerSessionService
 
     public void SyncParty(IEnumerable<PlayerSessionState> partyOrder)
     {
-        foreach (var partyPlayer in partyOrder)
+        var partyList = partyOrder.ToList();
+        foreach (var partyPlayer in partyList)
         {
-            var existing = session.SessionPlayers.FirstOrDefault(p => p.Identity.Equals(partyPlayer.Identity));
+            var existing = FindExistingPlayerForPartySync(partyPlayer.Identity);
             if (existing == null)
             {
                 session.SessionPlayers.Add(partyPlayer);
@@ -21,19 +22,56 @@ public sealed class PlayerSessionService
             }
             else
             {
+                // Preserve bank, hand, history, and bet state when someone leaves and
+                // returns, even if Dalamud temporarily omitted their world on one side
+                // of the sync. Only refresh identity/world metadata when the live party
+                // value is more complete.
+                if (string.IsNullOrWhiteSpace(existing.Identity.World) && !string.IsNullOrWhiteSpace(partyPlayer.Identity.World))
+                    existing.Identity = partyPlayer.Identity;
+
                 existing.PartySlot = partyPlayer.PartySlot;
                 if (existing.Status == PlayerStatus.LeftDisconnected) existing.Status = PlayerStatus.SittingOut;
             }
         }
-        foreach (var existing in session.SessionPlayers.Where(p => p.Status != PlayerStatus.Dealer))
+
+        foreach (var existing in session.SessionPlayers.Where(p => p.Status != PlayerStatus.Dealer).ToList())
         {
-            if (partyOrder.All(p => !p.Identity.Equals(existing.Identity)) && existing.Status != PlayerStatus.CashedOut)
+            if (partyList.All(p => !IsSamePlayerForSync(p.Identity, existing.Identity)) && existing.Status != PlayerStatus.CashedOut)
             {
                 existing.Status = PlayerStatus.LeftDisconnected;
                 VoidActiveHandsForDisconnected(existing);
+
+                if (existing.Bank.TotalTracked <= 0)
+                    RemovePlayer(existing, "Auto-removed disconnected player with 0 tracked gil.");
             }
         }
         session.SessionPlayers.Sort((a,b) => a.PartySlot.CompareTo(b.PartySlot));
+    }
+
+    public void RemovePlayer(PlayerSessionState player, string reason = "Removed from table")
+    {
+        VoidActiveHandsForDisconnected(player);
+        session.Round.Players.RemoveAll(p => IsSamePlayerForSync(p.Identity, player.Identity));
+        if (session.Round.ActivePlayerIndex >= session.Round.Players.Count)
+            session.Round.ActivePlayerIndex = Math.Max(0, session.Round.Players.Count - 1);
+        if (session.Round.Players.Count == 0 && session.Round.Phase is not BlackjackPhase.Idle)
+            session.Round.Phase = BlackjackPhase.CashOutBetweenHands;
+
+        session.SessionPlayers.RemoveAll(p => IsSamePlayerForSync(p.Identity, player.Identity));
+        log.Add(LogCategory.Info, $"{reason}: {player.DisplayName}.");
+    }
+
+    private PlayerSessionState? FindExistingPlayerForPartySync(PlayerIdentity identity)
+        => session.SessionPlayers.FirstOrDefault(p => IsSamePlayerForSync(p.Identity, identity));
+
+    private static bool IsSamePlayerForSync(PlayerIdentity a, PlayerIdentity b)
+    {
+        if (!string.Equals(a.Name, b.Name, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return string.IsNullOrWhiteSpace(a.World)
+            || string.IsNullOrWhiteSpace(b.World)
+            || string.Equals(a.World, b.World, StringComparison.OrdinalIgnoreCase);
     }
 
     public bool TryReserveBet(PlayerSessionState player, long amount, out string reason)
@@ -72,6 +110,8 @@ public sealed class PlayerSessionService
     {
         player.Bank.Available += amount;
         player.Bank.LastTradeAmount = amount;
+        if (amount > 0 && (player.Status is PlayerStatus.SittingOut or PlayerStatus.CashedOut or PlayerStatus.LeftDisconnected))
+            player.Status = PlayerStatus.Playing;
         log.Add(LogCategory.Trades, $"Bank deposit: {player.DisplayName} +{amount:N0} gil.");
     }
 
@@ -82,7 +122,7 @@ public sealed class PlayerSessionService
             hand.IsVoided = true;
             hand.IsComplete = true;
             player.Bank.Available += hand.Bet;
-            player.Bank.ActiveBet -= hand.Bet;
+            player.Bank.ActiveBet = Math.Max(0, player.Bank.ActiveBet - hand.Bet);
             log.Add(LogCategory.Warnings, $"Voided active hand for disconnected player {player.DisplayName}; returned {hand.Bet:N0} gil bet to tracked bank.");
         }
     }

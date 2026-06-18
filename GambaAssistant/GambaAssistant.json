@@ -1,11 +1,16 @@
 {
   "Author": "Airi Tsukino",
   "Name": "GambaAssistant",
-  "AssemblyVersion": "0.1.80.0",
+  "AssemblyVersion": "0.1.87.0",
   "Punchline": "Dealer-assist Blackjack & DRT for FFXIV venues.",
   "IconUrl": "https://raw.githubusercontent.com/AiriTsukino/GambaAssistant/main/GambaAssistant/Resources/GALogo.png",
-  "RepoUrl": "https://github.com/AiriTsukino/GambaAssistant",
   "Description": "Assists a single venue dealer with Blackjack phases, dice-based cards, bank tracking, narration, overlays, logs, and exports. Players do not need the plugin.",
   "ApplicableVersion": "any",
-  "Tags": [ "blackjack", "venue", "dealer", "dice", "gil" ]
+  "Tags": [
+    "blackjack",
+    "venue",
+    "dealer",
+    "dice",
+    "gil"
+  ]
 }

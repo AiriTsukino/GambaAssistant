@@ -202,13 +202,14 @@ public sealed class ChatTemplateSettingsTab
         DrawVariable("{player}", "The player name shown as Name@World when available.");
         DrawVariable("{card}", "The newly drawn card, such as A, 7, K, or Q.");
         DrawVariable("{hand}", "The visible cards in the current hand, such as A + 7.");
+        DrawVariable("{handLabel}", "The current hand label, usually Hand, or Hand 1 / Hand 2 during split hands.");
         DrawVariable("{total}", "The current Blackjack hand total, including soft totals when relevant.");
         DrawVariable("{bet}", "The active wager for the hand, formatted as a gil amount in chat.");
         DrawVariable("{bank}", "The player available bank after the current action or settlement.");
         DrawVariable("{dealer}", "The dealer final total or dealer comparison value during settlement.");
         DrawVariable("{outcome}", "The settlement result text, such as Win, Loss, Push, or Natural Blackjack payout.");
         DrawVariable("{payout}", "A payout amount when the message type supplies one.");
-        DrawVariable("{options}", "The legal actions for the active hand, such as Hit, Stand, Double, or Split. Only actions currently legal by the rules are listed.");
+        DrawVariable("{options}", "The legal actions for the active hand, such as Hit, Stand, Double Down, Double Down with additional gil, or Split. Only actions currently legal by the rules are listed.");
         DrawVariable("{amount}", "The formatted gil amount for bet announcements, such as 10,000.");
 
         ImGui.End();

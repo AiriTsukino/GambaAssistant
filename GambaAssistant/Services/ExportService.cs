@@ -33,7 +33,7 @@ public sealed class ExportService
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
         var sb = new StringBuilder();
-        sb.AppendLine("round,timestamp,player,dealer_cards,player_cards,bet,actions,outcome,bank_after");
+        sb.AppendLine("round,timestamp,player,dealer_cards,player_cards,bet,total_return,player_delta,actions,outcome,bank_after");
 
         foreach (var p in session.SessionPlayers)
         {
@@ -45,6 +45,8 @@ public sealed class ExportService
                   .Append(EscapeCsv(r.DealerCards)).Append(',')
                   .Append(EscapeCsv(r.PlayerCards)).Append(',')
                   .Append(r.Bet).Append(',')
+                  .Append(r.TotalReturn).Append(',')
+                  .Append(r.PlayerDelta).Append(',')
                   .Append(EscapeCsv(r.Actions)).Append(',')
                   .Append(EscapeCsv(r.Outcome)).Append(',')
                   .Append(r.BankAfter)

@@ -449,7 +449,7 @@ public static class ChatTemplateDefaults
         ["Settlement"] = "{player}: {bet} gil wager, {hand} versus dealer {dealer}. Result: {outcome}. Bank: {bank} gil.",
         ["DealerDraw"] = "Dealer draws {card}. Dealer total is {total}.",
         ["AllPlayersBust"] = "All active players have bust. The round is over.",
-        ["PlayerTurnOptions"] = "{player}'s turn. Hand: {hand} = {total}. Legal options: {options}.",
+        ["PlayerTurnOptions"] = "{player}'s turn. {handLabel}: {hand} = {total}. Legal options: {options}.",
         ["BetPlaced"] = "{player} has bet {amount} gil for this round."
     };
 
@@ -461,7 +461,7 @@ public static class ChatTemplateDefaults
         ["Settlement"] = "{player}: {outcome}. Bank {bank}.",
         ["DealerDraw"] = "Dealer: {card} ({total})",
         ["AllPlayersBust"] = "All players bust. Round over.",
-        ["PlayerTurnOptions"] = "{player}: {options}.",
+        ["PlayerTurnOptions"] = "{player}: {handLabel} {hand} ({total}). Options: {options}.",
         ["BetPlaced"] = "{player}: bet {amount} gil."
     };
 }
