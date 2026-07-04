@@ -20,6 +20,7 @@ public sealed class VenueProfile
     public float MessagePacingSeconds { get; set; } = 1.0f;
     public string ExportPrefix { get; set; } = "gamba-session";
     public string DefaultTipType { get; set; } = "Dealer tip";
+    public string NaturalBlackjackChatChannel { get; set; } = "/party";
 }
 
 [Serializable]
@@ -70,6 +71,8 @@ public sealed class ProfileService
         profile = new VenueProfile { Name = name, ChatTemplates = ChatTemplateDefaults.CreateFormal() };
         EnsureTemplateLibrary(profile);
         NormalizeDiceCommand(profile);
+        NormalizeBlackjackRuleDefaults(profile);
+        NormalizeProfileChatChannels(profile);
         Profiles.Add(profile);
         config.ActiveProfileId = profile.Id;
         SaveProfile(profile);
@@ -242,6 +245,13 @@ public sealed class ProfileService
         SaveProfile(profile);
     }
 
+    public void UpdateNaturalBlackjackChatChannel(VenueProfile profile, string channel)
+    {
+        profile.NaturalBlackjackChatChannel = NormalizeChatChannel(channel);
+        SaveProfile(profile);
+        log.Add(LogCategory.Info, $"Natural Blackjack broadcast channel for {profile.Name} set to {profile.NaturalBlackjackChatChannel}.");
+    }
+
     public void SaveProfile(VenueProfile profile)
     {
         EnsureTemplateLibrary(profile);
@@ -272,6 +282,7 @@ public sealed class ProfileService
             EnsureTemplateLibrary(profile);
             NormalizeDiceCommand(profile);
             NormalizeBlackjackRuleDefaults(profile);
+            NormalizeProfileChatChannels(profile);
             Profiles.Add(profile);
             SaveProfile(profile);
         }
@@ -282,6 +293,7 @@ public sealed class ProfileService
                 EnsureTemplateLibrary(profile);
                 NormalizeDiceCommand(profile);
                 NormalizeBlackjackRuleDefaults(profile);
+                NormalizeProfileChatChannels(profile);
                 SaveProfile(profile);
             }
         }
@@ -308,6 +320,7 @@ public sealed class ProfileService
         EnsureTemplateLibrary(replacement);
         NormalizeDiceCommand(replacement);
         NormalizeBlackjackRuleDefaults(replacement);
+        NormalizeProfileChatChannels(replacement);
         Profiles.Add(replacement);
         config.ActiveProfileId = replacement.Id;
         log.Add(LogCategory.Info, "Replaced old generated sample venues with a single Default venue profile.");
@@ -351,6 +364,20 @@ public sealed class ProfileService
         if (rules.NaturalBlackjackTotalMultiplier <= 0)
             rules.NaturalBlackjackTotalMultiplier = 3.5m;
     }
+
+    private static void NormalizeProfileChatChannels(VenueProfile profile)
+    {
+        profile.NaturalBlackjackChatChannel = NormalizeChatChannel(profile.NaturalBlackjackChatChannel);
+    }
+
+    private static string NormalizeChatChannel(string? channel) => channel?.Trim().ToLowerInvariant() switch
+    {
+        "/say" or "say" or "/s" or "s" => "/say",
+        "/shout" or "shout" or "/sh" or "sh" => "/shout",
+        "/yell" or "yell" or "/y" or "y" => "/yell",
+        "/party" or "party" or "/p" or "p" => "/party",
+        _ => "/party",
+    };
 
     private void EnsureTemplateLibrary(VenueProfile profile)
     {

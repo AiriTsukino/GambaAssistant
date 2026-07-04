@@ -25,6 +25,13 @@ public sealed class ChatQueueService : IDisposable
     }
 
     public void EnqueueParty(string message) => queue.Enqueue(new ChatQueueItem($"/p {message}", false, EffectiveDelaySeconds));
+    public void EnqueueBlackjackToChannel(string channel, string message)
+    {
+        var normalizedChannel = NormalizeChatChannel(channel);
+        queue.Enqueue(new ChatQueueItem($"{normalizedChannel} {message}", false, EffectiveDelaySeconds));
+        log.Add(LogCategory.ChatQueue, $"Blackjack broadcast queued ({normalizedChannel}): {message}");
+    }
+
     public void EnqueueDeathRoll(string message)
     {
         if (config.DeathRoll.DisableChatBroadcasts)

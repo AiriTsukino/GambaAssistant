@@ -63,6 +63,7 @@ public sealed class ChatTemplateSettingsTab
                 ImGui.TextDisabled("Template assignment and management are locked during an active session.");
         });
 
+        DrawNaturalBlackjackBroadcastSettings(profile);
         DrawTemplateManagement(profile, selected);
         DrawTemplateEditor(profile, selected);
         DrawVariablesWindow();
@@ -70,6 +71,37 @@ public sealed class ChatTemplateSettingsTab
         if (!string.IsNullOrWhiteSpace(lastMessage))
             ImGui.TextDisabled(lastMessage);
     }
+
+    private void DrawNaturalBlackjackBroadcastSettings(VenueProfile profile)
+    {
+        UiHelpers.Card("Natural Blackjack Broadcast", () =>
+        {
+            ImGui.TextDisabled("Choose where Natural Blackjack announcements are sent. Other Blackjack table messages continue using the normal party broadcast behavior.");
+
+            var channels = new[] { "/party", "/say", "/shout", "/yell" };
+            var current = NormalizeChatChannel(profile.NaturalBlackjackChatChannel);
+            var selectedChannel = Array.FindIndex(channels, c => string.Equals(c, current, StringComparison.OrdinalIgnoreCase));
+            if (selectedChannel < 0)
+                selectedChannel = 0;
+
+            ImGui.SetNextItemWidth(160f);
+            if (ImGui.Combo("Natural Blackjack channel", ref selectedChannel, channels, channels.Length))
+            {
+                profiles.UpdateNaturalBlackjackChatChannel(profile, channels[selectedChannel]);
+                lastMessage = $"Natural Blackjack announcements will use {channels[selectedChannel]}.";
+            }
+            UiHelpers.Tooltip("Sets the chat channel used only for Natural Blackjack announcements.");
+        });
+    }
+
+    private static string NormalizeChatChannel(string? channel) => channel?.Trim().ToLowerInvariant() switch
+    {
+        "/say" or "say" or "/s" or "s" => "/say",
+        "/shout" or "shout" or "/sh" or "sh" => "/shout",
+        "/yell" or "yell" or "/y" or "y" => "/yell",
+        "/party" or "party" or "/p" or "p" => "/party",
+        _ => "/party",
+    };
 
     private void DrawTemplateManagement(VenueProfile profile, ChatTemplateSet selected)
     {

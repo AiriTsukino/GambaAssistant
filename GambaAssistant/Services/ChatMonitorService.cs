@@ -378,14 +378,14 @@ public sealed class ChatMonitorService : IDisposable
                 return;
             }
 
-            var singleOutgoingPlayer = trades.ResolveSingleActivePartyPlayer();
+            var singleOutgoingPlayer = trades.ResolveSingleTrackedTradeCandidate();
             if (singleOutgoingPlayer is null)
             {
-                log.Add(LogCategory.Warnings, $"Detected outgoing gil amount {outgoingAmountOnly:N0}, but no active outgoing trade recipient was known and there is not exactly one eligible party player. Line: sender='{sender}', body='{body}'.");
+                log.Add(LogCategory.Warnings, $"Detected outgoing gil amount {outgoingAmountOnly:N0}, but no active outgoing trade recipient was known and there is not exactly one eligible tracked player. Line: sender='{sender}', body='{body}'.");
                 return;
             }
 
-            trades.AddDetectedOutgoingTrade(singleOutgoingPlayer.DisplayName, outgoingAmountOnly, "Detected outgoing gil amount; attributed to the only eligible party player");
+            trades.AddDetectedOutgoingTrade(singleOutgoingPlayer.DisplayName, outgoingAmountOnly, "Detected outgoing gil amount; attributed to the only eligible tracked player");
             pendingTradeLastAmount = outgoingAmountOnly;
             return;
         }
@@ -422,14 +422,14 @@ public sealed class ChatMonitorService : IDisposable
             return;
         }
 
-        var singlePlayer = trades.ResolveSingleActivePartyPlayer();
+        var singlePlayer = trades.ResolveSingleTrackedTradeCandidate();
         if (singlePlayer is null)
         {
-            log.Add(LogCategory.Warnings, $"Detected incoming gil amount {amountOnly:N0}, but the chat line did not include a player name and there is not exactly one eligible party player. Line: sender='{sender}', body='{body}'.");
+            log.Add(LogCategory.Warnings, $"Detected incoming gil amount {amountOnly:N0}, but the chat line did not include a player name and there is not exactly one eligible tracked player. Line: sender='{sender}', body='{body}'.");
             return;
         }
 
-        trades.AddDetectedIncomingTrade(singlePlayer.DisplayName, amountOnly, "Detected incoming gil trade amount; attributed to the only eligible party player");
+        trades.AddDetectedIncomingTrade(singlePlayer.DisplayName, amountOnly, "Detected incoming gil trade amount; attributed to the only eligible tracked player");
         pendingTradeLastAmount = amountOnly;
     }
 

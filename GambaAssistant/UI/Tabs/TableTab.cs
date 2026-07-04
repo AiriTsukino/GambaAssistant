@@ -519,14 +519,15 @@ public sealed class TableTab
 
         pendingInitialDealCards = (roundPlayers.Count * 2) + 1;
 
-        QueueAstrologianInitialDealFlavor(roundPlayers);
-
         if (session.Rules.InitialDealMode == BlackjackInitialDealMode.PlayerFullHandsThenDealer)
         {
             // Deal each player's complete starting hand first, announce that hand only
             // after both cards resolve, then deal the dealer's visible card last.
             foreach (var p in session.Round.Players)
+            {
+                QueueAstrologianBenefic(p);
                 RequestInitialPlayerFullHand(p, p.Hands[0]);
+            }
 
             RequestDealerCard("Dealer visible card", CountInitialDealCardResolved, continueDealerTurn: false);
             log.Add(LogCategory.RoundFlow, "Started full-hand initial deal using visible /dice results.");
@@ -538,7 +539,10 @@ public sealed class TableTab
         // dealer card, then the second card to each active player. The dealer's
         // final/reveal card is still rolled later during Dealer Turn per venue rules.
         foreach (var p in session.Round.Players)
+        {
+            QueueAstrologianBenefic(p);
             RequestCard(p, p.Hands[0], "Initial card 1", CountInitialDealCardResolved);
+        }
 
         RequestDealerCard("Dealer visible card", CountInitialDealCardResolved, continueDealerTurn: false);
 
@@ -590,8 +594,7 @@ public sealed class TableTab
     {
         if (IsNaturalByRules(hand))
         {
-            chat.EnqueueParty($"🎉 {player.DisplayName} has a Natural Blackjack! {hand.CardText} = 21.");
-            log.Add(LogCategory.RoundFlow, $"{player.DisplayName} has a Natural Blackjack on {hand.CardText}.");
+            AnnounceNaturalBlackjack(player, hand);
             return;
         }
 
@@ -600,41 +603,19 @@ public sealed class TableTab
             chat.EnqueueParty($"{player.DisplayName} busts with {hand.BestTotal}.");
     }
 
-    private void QueueAstrologianInitialDealFlavor(IReadOnlyList<PlayerSessionState> roundPlayers)
+    private void QueueAstrologianBenefic(PlayerSessionState player)
     {
-        if (!config.General.AstrologianImmersionEnabled)
+        if (!config.General.AstrologianImmersionEnabled || player.Status == PlayerStatus.Dealer)
             return;
 
-        if (chat.DemoMode)
-            log.Add(LogCategory.Demo, "AST immersion enabled: demo mode will queue/log AST action commands only; no real action commands are sent.");
-
-        var eligiblePlayers = roundPlayers
-            .Where(p => p.Status != PlayerStatus.Dealer)
-            .OrderBy(p => p.PartySlot)
-            .Take(3)
-            .ToList();
-
-        if (eligiblePlayers.Count == 0)
+        var targetName = GetTargetableCharacterName(player);
+        if (string.IsNullOrWhiteSpace(targetName))
             return;
 
-        // This is strictly cosmetic. Blackjack state progression never waits for these
-        // action commands and game-side failures/cooldowns are ignored by design.
-        chat.EnqueueCommand("/ac \"Umbral Draw\"");
-
-        var playActions = new[] { "Play I", "Play II", "Play III" };
-        for (var i = 0; i < eligiblePlayers.Count; i++)
-        {
-            var player = eligiblePlayers[i];
-            if (config.General.AstrologianUseTargetCommand)
-                chat.EnqueueCommand($"/target \"{GetTargetableCharacterName(player)}\"");
-
-            chat.EnqueueCommand($"/ac \"{playActions[i]}\"");
-        }
-
-        if (roundPlayers.Count > 3)
-            log.Add(LogCategory.ChatQueue, $"AST immersion queued for the first 3 active players; {roundPlayers.Count - 3} additional player(s) ignored for AST actions.");
-        else
-            log.Add(LogCategory.ChatQueue, $"AST immersion queued for {eligiblePlayers.Count} active player(s).");
+        chat.EnqueueCommand($"/target \"{targetName}\"");
+        chat.EnqueueCommand("/ac \"Benefic\" <t>");
+        chat.EnqueueCommand("/battlemode on");
+        log.Add(LogCategory.ChatQueue, $"Astrologian Benefic queued for {player.DisplayName}.");
     }
 
     private static string GetTargetableCharacterName(PlayerSessionState player)
@@ -668,6 +649,9 @@ public sealed class TableTab
     private void RequestCard(PlayerSessionState p, BlackjackHand hand, string reason, Action? afterApply = null, bool undoable = false)
     {
         var before = undoable ? CaptureSnapshot() : null;
+        if (session.Round.Phase == BlackjackPhase.PlayerTurns)
+            QueueAstrologianBenefic(p);
+
         dice.RequestRoll($"{reason} for {p.DisplayName} Hand {hand.HandNumber}", c =>
         {
             hand.AddCard(c);
@@ -675,8 +659,7 @@ public sealed class TableTab
 
             if (IsNaturalByRules(hand))
             {
-                chat.EnqueueParty($"🎉 {p.DisplayName} has a Natural Blackjack! {hand.CardText} = 21.");
-                log.Add(LogCategory.RoundFlow, $"{p.DisplayName} has a Natural Blackjack on {hand.CardText}.");
+                AnnounceNaturalBlackjack(p, hand);
             }
             else
             {
@@ -963,6 +946,33 @@ public sealed class TableTab
     {
         return Math.Max(0, hand.Bet - player.Bank.Available);
     }
+
+    private void AnnounceNaturalBlackjack(PlayerSessionState player, BlackjackHand hand)
+    {
+        var message = ApplyTemplate("NaturalBlackjack", new Dictionary<string, string>
+        {
+            ["player"] = player.DisplayName,
+            ["hand"] = hand.CardText,
+            ["handLabel"] = GetHandLabel(player, hand),
+            ["total"] = hand.TotalText,
+            ["bet"] = hand.Bet.ToString("N0"),
+            ["bank"] = player.Bank.Available.ToString("N0"),
+            ["outcome"] = "Natural Blackjack",
+        });
+
+        var channel = profiles.ActiveProfile.NaturalBlackjackChatChannel;
+        chat.EnqueueBlackjackToChannel(channel, message);
+        log.Add(LogCategory.RoundFlow, $"{player.DisplayName} has a Natural Blackjack on {hand.CardText}; announcement queued to {NormalizeChatChannel(channel)}.");
+    }
+
+    private static string NormalizeChatChannel(string? channel) => channel?.Trim().ToLowerInvariant() switch
+    {
+        "/say" or "say" or "/s" or "s" => "/say",
+        "/shout" or "shout" or "/sh" or "sh" => "/shout",
+        "/yell" or "yell" or "/y" or "y" => "/yell",
+        "/party" or "party" or "/p" or "p" => "/party",
+        _ => "/party",
+    };
 
     private string ApplyTemplate(string key, IReadOnlyDictionary<string, string> values)
     {

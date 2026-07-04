@@ -18,18 +18,15 @@ public sealed class TradeMonitorService
 
     public TradeEntry AddDetectedIncomingTrade(string playerName, long amount, string note = "Detected from chat/log text")
     {
-        var player = FindPlayerByName(playerName);
+        var player = FindPlayerByName(playerName) ?? RehydrateTradePlayer(playerName);
         var dealer = session.SessionPlayers.FirstOrDefault(p => p.Status == PlayerStatus.Dealer) ?? session.SessionPlayers.FirstOrDefault();
         if (player is null || dealer is null)
         {
-            var unknown = new PlayerIdentity(playerName.Trim(), string.Empty);
-            log.Add(LogCategory.Warnings, $"Detected possible incoming trade from {playerName} for {amount:N0} gil, but could not match them to a tracked party player.");
+            var unknown = CreateIdentityFromDisplay(playerName);
+            log.Add(LogCategory.Warnings, $"Detected possible incoming trade from {playerName} for {amount:N0} gil, but could not match them to a tracked table player.");
             return AddTrade(unknown, PlayerIdentity.UnknownDealer(), amount, TradeClassification.NeedsReview, note, manual: false);
         }
 
-        // 0.1.81: keep trade detection phase-independent. Incoming gil always
-        // increases the player's bank so buy-ins, re-buys, and double-down
-        // top-ups can be handled whenever they happen.
         return AddTrade(player.Identity, dealer.Identity, amount, TradeClassification.BuyInBankDeposit, note, manual: false);
     }
 
@@ -124,19 +121,102 @@ public sealed class TradeMonitorService
             || NormalizeName(p.DisplayName).Contains(normalized));
     }
 
-    public PlayerSessionState? ResolveSingleActivePartyPlayer()
+    public PlayerSessionState? ResolveSingleActivePartyPlayer() => ResolveSingleTrackedTradeCandidate();
+
+    public PlayerSessionState? ResolveSingleTrackedTradeCandidate()
     {
+        // Trade log lines often lose the player name and may still arrive after the
+        // player has left the party. Keep disconnected tracked players eligible for
+        // amount-only attribution, but only when there is exactly one safe candidate.
         var candidates = session.SessionPlayers
-            .Where(p => p.Status != PlayerStatus.Dealer && p.Status != PlayerStatus.LeftDisconnected && p.Status != PlayerStatus.CashedOut)
+            .Where(p => p.Status != PlayerStatus.Dealer && p.Status != PlayerStatus.SpectatorStaff)
             .ToList();
+
+        var activeOrFunded = candidates
+            .Where(p => p.Status != PlayerStatus.CashedOut || p.Bank.TotalTracked > 0)
+            .ToList();
+
+        if (activeOrFunded.Count == 1)
+            return activeOrFunded[0];
+
         return candidates.Count == 1 ? candidates[0] : null;
     }
 
     private bool TryGetPlayer(PlayerIdentity identity, out PlayerSessionState player)
     {
-        player = session.SessionPlayers.FirstOrDefault(p => p.Identity.Equals(identity))
-            ?? session.SessionPlayers.FirstOrDefault(p => NormalizeName(p.Identity.Name) == NormalizeName(identity.Name))!;
-        return player is not null;
+        var match = session.SessionPlayers.FirstOrDefault(p => p.Identity.Equals(identity))
+            ?? session.SessionPlayers.FirstOrDefault(p => NormalizeName(p.Identity.Name) == NormalizeName(identity.Name))
+            ?? session.SessionPlayers.FirstOrDefault(p => NamesLooselyMatch(p.DisplayName, identity.Display));
+
+        if (match is null)
+        {
+            player = null!;
+            return false;
+        }
+
+        player = match;
+        return true;
+    }
+
+
+    private PlayerSessionState? RehydrateTradePlayer(string playerName)
+    {
+        var identity = CreateIdentityFromDisplay(playerName);
+        if (string.IsNullOrWhiteSpace(identity.Name))
+            return null;
+
+        if (session.SessionPlayers.Any(p => p.Status == PlayerStatus.Dealer && NamesLooselyMatch(p.DisplayName, identity.Display)))
+            return null;
+
+        var nextSlot = Math.Max(2, session.SessionPlayers.Where(p => p.Status != PlayerStatus.Dealer).Select(p => p.PartySlot).DefaultIfEmpty(1).Max() + 1);
+        var player = new PlayerSessionState
+        {
+            Identity = identity,
+            PartySlot = nextSlot,
+            Status = PlayerStatus.Playing
+        };
+
+        session.SessionPlayers.Add(player);
+        log.Add(LogCategory.Trades, $"Re-added trade player {player.DisplayName} from detected trade text.");
+        return player;
+    }
+
+    private static PlayerIdentity CreateIdentityFromDisplay(string display)
+    {
+        var cleaned = display.Trim();
+        var atIndex = cleaned.IndexOf('@', StringComparison.Ordinal);
+        if (atIndex > 0)
+        {
+            var name = cleaned[..atIndex].Trim();
+            var world = cleaned[(atIndex + 1)..].Trim();
+            return new PlayerIdentity(name, world);
+        }
+
+        var worldName = GetLocalWorldName();
+        return new PlayerIdentity(cleaned, worldName);
+    }
+
+    private static string GetLocalWorldName()
+    {
+        try
+        {
+            return DalamudServices.PlayerState.IsLoaded
+                ? DalamudServices.PlayerState.HomeWorld.Value.Name.ExtractText()
+                : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static bool NamesLooselyMatch(string left, string right)
+    {
+        var a = NormalizeName(left);
+        var b = NormalizeName(right);
+        return !string.IsNullOrWhiteSpace(a)
+            && !string.IsNullOrWhiteSpace(b)
+            && (a == b || a.Contains(b, StringComparison.OrdinalIgnoreCase) || b.Contains(a, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string NormalizeName(string value) => value.Trim().Replace("@", " ").Replace("  ", " ").ToLowerInvariant();

@@ -39,19 +39,12 @@ public sealed class GeneralSettingsTab
 
         UiHelpers.Card("Astrologian Immersion", () =>
         {
-            ImGui.TextWrapped("Optional visual flavor only. When enabled, GambaAssistant queues AST commands during the initial deal, but Blackjack dice/card flow never waits for these actions to succeed.");
+            ImGui.TextWrapped("Optional visual flavor only. Blackjack dice/card flow does not wait for these actions to complete.");
 
             var enabled = config.General.AstrologianImmersionEnabled;
-            if (ImGui.Checkbox("Use Astrologian card actions while dealing", ref enabled))
+            if (ImGui.Checkbox("Cast Benefic on players while dealing", ref enabled))
                 config.General.AstrologianImmersionEnabled = enabled;
-            UiHelpers.Tooltip("During the initial deal, this sends /ac \"Umbral Draw\" once and then /ac \"Play I\", /ac \"Play II\", and /ac \"Play III\" to the first three active players only.");
-
-            var target = config.General.AstrologianUseTargetCommand;
-            if (ImGui.Checkbox("Target each player before Play actions", ref target))
-                config.General.AstrologianUseTargetCommand = target;
-            UiHelpers.Tooltip("Queues /target \"Player Name\" before the matching Play action. If targeting or the AST action fails, the Blackjack round continues normally.");
-
-            DrawDisabledWrapped("Cooldown safety: Umbral Draw is queued at most once per round/hand. Extra players after the first three are ignored for immersion actions.");
+            UiHelpers.Tooltip("Targets each active Blackjack player and casts Benefic once as their initial hand is dealt, then sets battle mode back on.");
         });
 
         UiHelpers.Card("Exports", () =>
