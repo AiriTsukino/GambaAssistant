@@ -25,6 +25,8 @@ public sealed class TableTab
     private bool dealerTurnStarted;
     private bool allBustRoundOverAnnounced;
     private double nextLivePartySyncTime;
+    private string? lastAstrologianBeneficTurnKey;
+    private double nextAstrologianBattleModeRefreshTime;
 
     public TableTab(Configuration config, BlackjackSession session, ProfileService profiles, PartyService party, PlayerSessionService players, DealerLedgerService dealerLedger, DiceService dice, ChatQueueService chat, UndoService undo, LogService log)
     {
@@ -43,6 +45,7 @@ public sealed class TableTab
     public void Draw()
     {
         AutoSyncLiveParty();
+        QueueAstrologianBattleModeRefreshIfNeeded();
         DrawStatusHeader();
         DrawRoundControls();
         DrawDealerCard();
@@ -99,6 +102,8 @@ public sealed class TableTab
                 pendingInitialDealCards = 0;
                 dealerTurnStarted = false;
                 allBustRoundOverAnnounced = false;
+                lastAstrologianBeneficTurnKey = null;
+                nextAstrologianBattleModeRefreshTime = 0;
             }
             DrawSameLineIfFits("Sync Party Now");
             if (ButtonWithTooltip("Sync Party Now", "Forces an immediate live party refresh. Demo mode remains isolated."))
@@ -149,6 +154,8 @@ public sealed class TableTab
                 pendingInitialDealCards = 0;
                 dealerTurnStarted = false;
                 allBustRoundOverAnnounced = false;
+                lastAstrologianBeneficTurnKey = null;
+                nextAstrologianBattleModeRefreshTime = 0;
             }
 
             var nextUndo = undo.Actions.FirstOrDefault();
@@ -498,7 +505,10 @@ public sealed class TableTab
         var before = CaptureSnapshot();
         dealerTurnStarted = false;
         allBustRoundOverAnnounced = false;
+        lastAstrologianBeneficTurnKey = null;
+        nextAstrologianBattleModeRefreshTime = 0;
         chat.EnqueueParty("Bets closed. Dealing next round.");
+        QueueAstrologianAstralDraw();
         var roundPlayers = session.SessionPlayers
             .Where(p => p.BetConfirmed)
             .OrderBy(p => p.PartySlot)
@@ -525,7 +535,6 @@ public sealed class TableTab
             // after both cards resolve, then deal the dealer's visible card last.
             foreach (var p in session.Round.Players)
             {
-                QueueAstrologianBenefic(p);
                 RequestInitialPlayerFullHand(p, p.Hands[0]);
             }
 
@@ -540,7 +549,6 @@ public sealed class TableTab
         // final/reveal card is still rolled later during Dealer Turn per venue rules.
         foreach (var p in session.Round.Players)
         {
-            QueueAstrologianBenefic(p);
             RequestCard(p, p.Hands[0], "Initial card 1", CountInitialDealCardResolved);
         }
 
@@ -603,19 +611,57 @@ public sealed class TableTab
             chat.EnqueueParty($"{player.DisplayName} busts with {hand.BestTotal}.");
     }
 
-    private void QueueAstrologianBenefic(PlayerSessionState player)
+    private void QueueAstrologianAstralDraw()
+    {
+        if (!config.General.AstrologianAstralDrawOnDealEnabled)
+            return;
+
+        chat.EnqueueCommand("/battlemode on");
+        chat.EnqueueCommand("/ac \"Astral Draw\"");
+        QueueAstrologianBattleModeOn();
+        log.Add(LogCategory.ChatQueue, "Astrologian Astral Draw queued for the initial deal.");
+    }
+
+    private void QueueAstrologianBattleModeOn()
+    {
+        chat.EnqueueCommand("/battlemode on");
+        nextAstrologianBattleModeRefreshTime = ImGui.GetTime() + 8.0;
+    }
+
+    private void QueueAstrologianBattleModeRefreshIfNeeded()
+    {
+        if (!config.General.AstrologianKeepBattleModeOnEnabled || chat.Paused)
+            return;
+
+        if (session.Round.Phase is BlackjackPhase.Idle or BlackjackPhase.CashOutBetweenHands)
+            return;
+
+        var now = ImGui.GetTime();
+        if (now < nextAstrologianBattleModeRefreshTime)
+            return;
+
+        QueueAstrologianBattleModeOn();
+        log.Add(LogCategory.ChatQueue, "Astrologian battle mode refresh queued.");
+    }
+
+    private void QueueAstrologianBeneficForTurn(PlayerSessionState player, BlackjackHand hand)
     {
         if (!config.General.AstrologianImmersionEnabled || player.Status == PlayerStatus.Dealer)
+            return;
+
+        var turnKey = $"{session.Round.RoundNumber}|{player.Identity.Name}|{player.Identity.World}|{hand.HandNumber}";
+        if (string.Equals(lastAstrologianBeneficTurnKey, turnKey, StringComparison.Ordinal))
             return;
 
         var targetName = GetTargetableCharacterName(player);
         if (string.IsNullOrWhiteSpace(targetName))
             return;
 
+        lastAstrologianBeneficTurnKey = turnKey;
         chat.EnqueueCommand($"/target \"{targetName}\"");
         chat.EnqueueCommand("/ac \"Benefic\" <t>");
-        chat.EnqueueCommand("/battlemode on");
-        log.Add(LogCategory.ChatQueue, $"Astrologian Benefic queued for {player.DisplayName}.");
+        QueueAstrologianBattleModeOn();
+        log.Add(LogCategory.ChatQueue, $"Astrologian Benefic queued for {player.DisplayName} {GetHandLabel(player, hand)}.");
     }
 
     private static string GetTargetableCharacterName(PlayerSessionState player)
@@ -649,8 +695,6 @@ public sealed class TableTab
     private void RequestCard(PlayerSessionState p, BlackjackHand hand, string reason, Action? afterApply = null, bool undoable = false)
     {
         var before = undoable ? CaptureSnapshot() : null;
-        if (session.Round.Phase == BlackjackPhase.PlayerTurns)
-            QueueAstrologianBenefic(p);
 
         dice.RequestRoll($"{reason} for {p.DisplayName} Hand {hand.HandNumber}", c =>
         {
@@ -809,7 +853,7 @@ public sealed class TableTab
 
         chat.EnqueueParty($"Current turn: {player.DisplayName} Hand {hand.HandNumber}: {hand.CardText} = {hand.TotalText}. Bet: {hand.Bet:N0} gil.");
         chat.EnqueueParty($"Dealer showing: {session.Round.DealerHand.CardText} = {session.Round.DealerHand.TotalText}.");
-        AnnounceActivePlayerTurn();
+        AnnounceActivePlayerTurn(triggerTurnImmersion: false);
         log.Add(LogCategory.ChatQueue, $"Rebroadcast current turn for {player.DisplayName} Hand {hand.HandNumber}.");
     }
 
@@ -838,10 +882,13 @@ public sealed class TableTab
         log.Add(LogCategory.ChatQueue, $"Rebroadcast current player banks for {entries.Count} tracked player(s).");
     }
 
-    private void AnnounceActivePlayerTurn()
+    private void AnnounceActivePlayerTurn(bool triggerTurnImmersion = true)
     {
         if (session.Round.Phase != BlackjackPhase.PlayerTurns || session.ActivePlayer is not { } player || session.ActiveHand is not { } hand || hand.IsComplete)
             return;
+
+        if (triggerTurnImmersion)
+            QueueAstrologianBeneficForTurn(player, hand);
 
         var options = BuildLegalOptions(hand);
         var handLabel = GetHandLabel(player, hand);
@@ -1123,6 +1170,8 @@ public sealed class TableTab
         pendingInitialDealCards = 0;
         dealerTurnStarted = false;
         allBustRoundOverAnnounced = false;
+        lastAstrologianBeneficTurnKey = null;
+        nextAstrologianBattleModeRefreshTime = 0;
         foreach (var p in session.SessionPlayers)
         {
             p.BetConfirmed = false;
@@ -1177,6 +1226,8 @@ public sealed class TableTab
         pendingInitialDealCards = snapshot.PendingInitialDealCards;
         dealerTurnStarted = snapshot.DealerTurnStarted;
         allBustRoundOverAnnounced = snapshot.AllBustRoundOverAnnounced;
+        lastAstrologianBeneficTurnKey = null;
+        nextAstrologianBattleModeRefreshTime = 0;
 
         log.Add(LogCategory.Undo, "Blackjack table state restored to the previous action.");
     }

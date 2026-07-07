@@ -24,7 +24,8 @@ public sealed class GeneralSettings
     public int UndoLimit { get; set; } = 10;
     public string ExportDirectory { get; set; } = string.Empty;
     public bool AstrologianImmersionEnabled { get; set; } = false;
-    public bool AstrologianUseTargetCommand { get; set; } = true;
+    public bool AstrologianAstralDrawOnDealEnabled { get; set; } = false;
+    public bool AstrologianKeepBattleModeOnEnabled { get; set; } = false;
 }
 
 [Serializable]
