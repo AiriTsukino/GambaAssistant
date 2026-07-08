@@ -35,67 +35,96 @@ public sealed class Plugin : IDalamudPlugin
     private DeathRollBracketWindow? drtBracketWindow;
     private DateTimeOffset nextBlackjackAutosaveAt = DateTimeOffset.MinValue;
     private DateTimeOffset nextDeathRollAutosaveAt = DateTimeOffset.MinValue;
+    private bool disposed;
 
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
-        DalamudServices.Initialize(pluginInterface);
-        config = DalamudServices.PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
-        log = new LogService();
-        persistence = new PersistenceService(config);
-        profiles = new ProfileService(config, persistence, log);
-        session = persistence.LoadBlackjackSession() ?? new BlackjackSession();
-        if (session.Rules is null)
-            session.Rules = profiles.ActiveProfile.BlackjackRules;
-        chatQueue = new ChatQueueService(config, log);
-        party = new PartyService(log);
-        players = new PlayerSessionService(session, log);
-        ledger = new DealerLedgerService(session, log);
-        tradeMonitor = new TradeMonitorService(session, ledger, log);
-        dice = new DiceService(session, chatQueue, log);
-        chatMonitor = new ChatMonitorService(dice, tradeMonitor, log);
-        overlays = new OverlayService(config, session, log);
-        undo = new UndoService(config, log);
-        demo = new DemoModeService(session, chatQueue, log);
-        exports = new ExportService(persistence, config, session, log);
-        var restoredDeathRollTournament = persistence.LoadDeathRollTournament();
-        deathRoll = new DeathRollTournamentService(config, party, chatQueue, log, restoredDeathRollTournament);
+        try
+        {
+            DalamudServices.Initialize(pluginInterface);
+            config = DalamudServices.PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+            log = new LogService();
+            persistence = new PersistenceService(config);
+            profiles = new ProfileService(config, persistence, log);
+            session = persistence.LoadBlackjackSession() ?? new BlackjackSession();
+            if (session.Rules is null)
+                session.Rules = profiles.ActiveProfile.BlackjackRules;
+            chatQueue = new ChatQueueService(config, log);
+            party = new PartyService(log);
+            players = new PlayerSessionService(session, log);
+            ledger = new DealerLedgerService(session, log);
+            tradeMonitor = new TradeMonitorService(session, ledger, log);
+            dice = new DiceService(session, chatQueue, log);
+            chatMonitor = new ChatMonitorService(dice, tradeMonitor, log);
+            overlays = new OverlayService(config, session, log);
+            undo = new UndoService(config, log);
+            demo = new DemoModeService(session, chatQueue, log);
+            exports = new ExportService(persistence, config, session, log);
+            var restoredDeathRollTournament = persistence.LoadDeathRollTournament();
+            deathRoll = new DeathRollTournamentService(config, party, chatQueue, log, restoredDeathRollTournament);
 
-        mainWindow = new MainWindow(config, session, profiles, party, players, ledger, tradeMonitor, dice, chatQueue, overlays, undo, demo, exports, deathRoll, log, OpenSettingsWindow, SetDrtBracketWindowOpen) { IsOpen = config.WindowVisible };
-        settingsWindow = new SettingsWindow(config, session, profiles, persistence, log) { IsOpen = config.SettingsWindowVisible };
-        drtBracketWindow = new DeathRollBracketWindow(mainWindow) { IsOpen = config.DeathRoll.BracketWindowOpen };
-        windowSystem.AddWindow(mainWindow);
-        windowSystem.AddWindow(settingsWindow);
-        windowSystem.AddWindow(drtBracketWindow);
+            mainWindow = new MainWindow(config, session, profiles, party, players, ledger, tradeMonitor, dice, chatQueue, overlays, undo, demo, exports, deathRoll, log, OpenSettingsWindow, SetDrtBracketWindowOpen) { IsOpen = config.WindowVisible };
+            settingsWindow = new SettingsWindow(config, session, profiles, persistence, log) { IsOpen = config.SettingsWindowVisible };
+            drtBracketWindow = new DeathRollBracketWindow(mainWindow) { IsOpen = config.DeathRoll.BracketWindowOpen };
+            windowSystem.AddWindow(mainWindow);
+            windowSystem.AddWindow(settingsWindow);
+            windowSystem.AddWindow(drtBracketWindow);
 
-        DalamudServices.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand) { HelpMessage = "Toggle GambaAssistant table window." });
-        DalamudServices.CommandManager.AddHandler(SettingsCommandName, new CommandInfo(OnSettingsCommand) { HelpMessage = "Toggle GambaAssistant settings window." });
-        DalamudServices.PluginInterface.UiBuilder.Draw += DrawUi;
-        DalamudServices.PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
-        DalamudServices.PluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
-        persistence.SaveNow();
-        persistence.SaveBlackjackSession(session);
-        persistence.SaveDeathRollTournament(deathRoll.Tournament);
+            DalamudServices.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand) { HelpMessage = "Toggle GambaAssistant table window." });
+            DalamudServices.CommandManager.AddHandler(SettingsCommandName, new CommandInfo(OnSettingsCommand) { HelpMessage = "Toggle GambaAssistant settings window." });
+            DalamudServices.PluginInterface.UiBuilder.Draw += DrawUi;
+            DalamudServices.PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
+            DalamudServices.PluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
+
+            SafeRun("Save initial plugin config", () => persistence.SaveNow());
+            SafeRun("Save initial Blackjack session", () => persistence.SaveBlackjackSession(session));
+            SafeRun("Save initial DRT session", () => persistence.SaveDeathRollTournament(deathRoll.Tournament));
+        }
+        catch (Exception ex)
+        {
+            LogException("GambaAssistant startup", ex);
+            Dispose();
+            throw;
+        }
     }
 
     private void OnCommand(string command, string arguments) => ToggleMainUi();
     private void OnSettingsCommand(string command, string arguments) => ToggleConfigUi();
-    private void OpenSettingsWindow() { config.SettingsWindowVisible = true; settingsWindow.IsOpen = true; persistence.SaveNow(); }
+
+    private void OpenSettingsWindow()
+    {
+        config.SettingsWindowVisible = true;
+        settingsWindow.IsOpen = true;
+        SafeRun("Save settings window visibility", () => persistence.SaveNow());
+    }
 
     private void SetDrtBracketWindowOpen(bool isOpen)
     {
         config.DeathRoll.BracketWindowOpen = isOpen;
         if (drtBracketWindow is not null)
             drtBracketWindow.IsOpen = isOpen;
-        persistence.SaveNow();
+        SafeRun("Save DRT bracket window visibility", () => persistence.SaveNow());
     }
 
-    private void ToggleMainUi() { config.WindowVisible = !config.WindowVisible; mainWindow.IsOpen = config.WindowVisible; persistence.SaveNow(); }
-    private void ToggleConfigUi() { config.SettingsWindowVisible = !config.SettingsWindowVisible; settingsWindow.IsOpen = config.SettingsWindowVisible; persistence.SaveNow(); }
+    private void ToggleMainUi()
+    {
+        config.WindowVisible = !config.WindowVisible;
+        mainWindow.IsOpen = config.WindowVisible;
+        SafeRun("Save main window visibility", () => persistence.SaveNow());
+    }
+
+    private void ToggleConfigUi()
+    {
+        config.SettingsWindowVisible = !config.SettingsWindowVisible;
+        settingsWindow.IsOpen = config.SettingsWindowVisible;
+        SafeRun("Save settings window visibility", () => persistence.SaveNow());
+    }
 
     private void DrawUi()
     {
-        windowSystem.Draw();
-        overlays.Draw();
+        SafeRun("Draw windows", () => windowSystem.Draw());
+        SafeRun("Draw overlays", () => overlays.Draw());
+
         var saveVisibility = false;
         if (config.WindowVisible != mainWindow.IsOpen || config.SettingsWindowVisible != settingsWindow.IsOpen)
         {
@@ -111,10 +140,10 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (saveVisibility)
-            persistence.SaveNow();
+            SafeRun("Save window visibility", () => persistence.SaveNow());
 
-        AutosaveBlackjackSession();
-        AutosaveDeathRollTournament();
+        SafeRun("Autosave Blackjack session", AutosaveBlackjackSession);
+        SafeRun("Autosave DRT session", AutosaveDeathRollTournament);
     }
 
     private void AutosaveBlackjackSession()
@@ -145,19 +174,59 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
-        persistence.SaveBlackjackSession(session);
-        persistence.SaveDeathRollTournament(deathRoll.Tournament);
-        persistence.SaveNow();
-        DalamudServices.PluginInterface.UiBuilder.Draw -= DrawUi;
-        DalamudServices.PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
-        DalamudServices.PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
-        DalamudServices.CommandManager.RemoveHandler(CommandName);
-        DalamudServices.CommandManager.RemoveHandler(SettingsCommandName);
-        windowSystem.RemoveAllWindows();
-        deathRoll.Dispose();
-        chatMonitor.Dispose();
-        dice.Dispose();
-        chatQueue.Dispose();
-        persistence.Dispose();
+        if (disposed)
+            return;
+
+        disposed = true;
+
+        SafeRun("Unsubscribe main window draw", () => { DalamudServices.PluginInterface.UiBuilder.Draw -= DrawUi; });
+        SafeRun("Unsubscribe main window command", () => { DalamudServices.PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi; });
+        SafeRun("Unsubscribe settings window command", () => { DalamudServices.PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi; });
+        SafeRun("Remove main command", () => DalamudServices.CommandManager.RemoveHandler(CommandName));
+        SafeRun("Remove settings command", () => DalamudServices.CommandManager.RemoveHandler(SettingsCommandName));
+        SafeRun("Remove windows", () => windowSystem.RemoveAllWindows());
+
+        SafeRun("Dispose DRT service", () => { if (deathRoll is not null) deathRoll.Dispose(); });
+        SafeRun("Dispose chat monitor", () => { if (chatMonitor is not null) chatMonitor.Dispose(); });
+        SafeRun("Dispose dice service", () => { if (dice is not null) dice.Dispose(); });
+        SafeRun("Dispose chat queue", () => { if (chatQueue is not null) chatQueue.Dispose(); });
+
+        SafeRun("Save Blackjack session on unload", () => { if (persistence is not null && session is not null) persistence.SaveBlackjackSession(session); });
+        SafeRun("Save DRT session on unload", () => { if (persistence is not null && deathRoll is not null) persistence.SaveDeathRollTournament(deathRoll.Tournament); });
+        SafeRun("Save plugin config on unload", () => { if (persistence is not null) persistence.SaveNow(); });
+        SafeRun("Dispose persistence", () => { if (persistence is not null) persistence.Dispose(); });
+    }
+
+    private void SafeRun(string actionName, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            LogException(actionName, ex);
+        }
+    }
+
+    private void LogException(string actionName, Exception ex)
+    {
+        try
+        {
+            log?.Add(LogCategory.Errors, $"{actionName} failed: {ex.Message}");
+        }
+        catch
+        {
+            // ignored
+        }
+
+        try
+        {
+            DalamudServices.Log.Error(ex, $"{actionName} failed.");
+        }
+        catch
+        {
+            // ignored
+        }
     }
 }
