@@ -12,7 +12,11 @@ public sealed class PlayerSessionService
     public void SyncParty(IEnumerable<PlayerSessionState> partyOrder)
     {
         var partyList = partyOrder.ToList();
-        foreach (var partyPlayer in partyList)
+        var dealer = partyList.FirstOrDefault(p => p.Status == PlayerStatus.Dealer);
+        if (dealer is not null)
+            SyncDealer(dealer);
+
+        foreach (var partyPlayer in partyList.Where(p => p.Status != PlayerStatus.Dealer))
         {
             var existing = FindExistingPlayerForPartySync(partyPlayer.Identity);
             if (existing == null)
@@ -22,26 +26,24 @@ public sealed class PlayerSessionService
             }
             else
             {
-                // Preserve bank, hand, history, and bet state when someone leaves and
-                // returns, even if Dalamud temporarily omitted their world on one side
-                // of the sync. Only refresh identity/world metadata when the live party
-                // value is more complete.
                 if (string.IsNullOrWhiteSpace(existing.Identity.World) && !string.IsNullOrWhiteSpace(partyPlayer.Identity.World))
                     existing.Identity = partyPlayer.Identity;
 
                 existing.PartySlot = partyPlayer.PartySlot;
-                if (existing.Status == PlayerStatus.LeftDisconnected) existing.Status = PlayerStatus.SittingOut;
+                if ((existing.Status is PlayerStatus.LeftDisconnected or PlayerStatus.SittingOut) && ShouldRestoreRoundPlayerAsPlaying(existing))
+                    existing.Status = PlayerStatus.Playing;
+                else if (existing.Status == PlayerStatus.LeftDisconnected)
+                    existing.Status = PlayerStatus.SittingOut;
             }
         }
 
         foreach (var existing in session.SessionPlayers.Where(p => p.Status != PlayerStatus.Dealer).ToList())
         {
-            if (partyList.All(p => !IsSamePlayerForSync(p.Identity, existing.Identity)) && existing.Status != PlayerStatus.CashedOut)
+            if (partyList.All(p => p.Status == PlayerStatus.Dealer || !IsSamePlayerForSync(p.Identity, existing.Identity)) && existing.Status != PlayerStatus.CashedOut)
             {
                 existing.Status = PlayerStatus.LeftDisconnected;
-                VoidActiveHandsForDisconnected(existing);
 
-                if (existing.Bank.TotalTracked <= 0)
+                if (existing.Bank.TotalTracked <= 0 && CanAutoRemoveDisconnectedPlayer(existing))
                     RemovePlayer(existing, "Auto-removed disconnected player with 0 tracked gil.");
             }
         }
@@ -61,8 +63,83 @@ public sealed class PlayerSessionService
         log.Add(LogCategory.Info, $"{reason}: {player.DisplayName}.");
     }
 
+    private void SyncDealer(PlayerSessionState liveDealer)
+    {
+        liveDealer.Status = PlayerStatus.Dealer;
+        liveDealer.PartySlot = 1;
+        liveDealer.BetConfirmed = false;
+        liveDealer.Hands.Clear();
+
+        var dealer = session.SessionPlayers.FirstOrDefault(p => p.Status == PlayerStatus.Dealer)
+            ?? session.SessionPlayers.FirstOrDefault(p => IsSamePlayerForSync(p.Identity, liveDealer.Identity));
+
+        if (dealer is null)
+        {
+            dealer = new PlayerSessionState
+            {
+                Identity = liveDealer.Identity,
+                PartySlot = 1,
+                Status = PlayerStatus.Dealer
+            };
+            session.SessionPlayers.Add(dealer);
+            log.Add(LogCategory.Info, $"Added dealer {dealer.DisplayName}.");
+        }
+        else
+        {
+            var oldDisplayName = dealer.DisplayName;
+            dealer.Identity = liveDealer.Identity;
+            dealer.PartySlot = 1;
+            dealer.Status = PlayerStatus.Dealer;
+            dealer.BetConfirmed = false;
+            dealer.Hands.Clear();
+            dealer.Bank ??= new PlayerBank();
+
+            if (!string.Equals(oldDisplayName, dealer.DisplayName, StringComparison.OrdinalIgnoreCase))
+                log.Add(LogCategory.Info, $"Updated dealer identity to {dealer.DisplayName}.");
+        }
+
+        foreach (var duplicate in session.SessionPlayers
+            .Where(p => !ReferenceEquals(p, dealer) && (p.Status == PlayerStatus.Dealer || IsSamePlayerForSync(p.Identity, liveDealer.Identity)))
+            .ToList())
+        {
+            session.SessionPlayers.Remove(duplicate);
+            log.Add(LogCategory.Info, $"Removed duplicate dealer entry {duplicate.DisplayName}.");
+        }
+
+        session.Round.Players.RemoveAll(p => p.Status == PlayerStatus.Dealer || IsSamePlayerForSync(p.Identity, liveDealer.Identity));
+        if (session.Round.ActivePlayerIndex >= session.Round.Players.Count)
+            session.Round.ActivePlayerIndex = Math.Max(0, session.Round.Players.Count - 1);
+    }
+
+    private bool ShouldRestoreRoundPlayerAsPlaying(PlayerSessionState player)
+    {
+        if (!IsCurrentRoundPlayer(player))
+            return false;
+
+        if (session.Round.Phase is BlackjackPhase.Idle or BlackjackPhase.CashOutBetweenHands)
+            return false;
+
+        return player.BetConfirmed
+            || player.Bank.ActiveBet > 0
+            || player.Hands.Any(h => !h.IsVoided && h.Cards.Count > 0);
+    }
+
+    private bool CanAutoRemoveDisconnectedPlayer(PlayerSessionState player)
+    {
+        if (!IsCurrentRoundPlayer(player))
+            return true;
+
+        if (session.Round.Phase is BlackjackPhase.Idle or BlackjackPhase.CashOutBetweenHands or BlackjackPhase.BettingOpen)
+            return player.Bank.ActiveBet <= 0 && player.Hands.Count == 0;
+
+        return false;
+    }
+
+    private bool IsCurrentRoundPlayer(PlayerSessionState player)
+        => session.Round.Players.Any(p => IsSamePlayerForSync(p.Identity, player.Identity));
+
     private PlayerSessionState? FindExistingPlayerForPartySync(PlayerIdentity identity)
-        => session.SessionPlayers.FirstOrDefault(p => IsSamePlayerForSync(p.Identity, identity));
+        => session.SessionPlayers.FirstOrDefault(p => p.Status != PlayerStatus.Dealer && IsSamePlayerForSync(p.Identity, identity));
 
     private static bool IsSamePlayerForSync(PlayerIdentity a, PlayerIdentity b)
     {

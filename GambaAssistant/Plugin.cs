@@ -33,6 +33,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly MainWindow mainWindow;
     private readonly SettingsWindow settingsWindow;
     private DeathRollBracketWindow? drtBracketWindow;
+    private DateTimeOffset nextBlackjackAutosaveAt = DateTimeOffset.MinValue;
+    private DateTimeOffset nextDeathRollAutosaveAt = DateTimeOffset.MinValue;
 
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
@@ -40,9 +42,10 @@ public sealed class Plugin : IDalamudPlugin
         config = DalamudServices.PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         log = new LogService();
         persistence = new PersistenceService(config);
-        session = new BlackjackSession();
         profiles = new ProfileService(config, persistence, log);
-        session.Rules = profiles.ActiveProfile.BlackjackRules;
+        session = persistence.LoadBlackjackSession() ?? new BlackjackSession();
+        if (session.Rules is null)
+            session.Rules = profiles.ActiveProfile.BlackjackRules;
         chatQueue = new ChatQueueService(config, log);
         party = new PartyService(log);
         players = new PlayerSessionService(session, log);
@@ -54,7 +57,8 @@ public sealed class Plugin : IDalamudPlugin
         undo = new UndoService(config, log);
         demo = new DemoModeService(session, chatQueue, log);
         exports = new ExportService(persistence, config, session, log);
-        deathRoll = new DeathRollTournamentService(config, party, chatQueue, log);
+        var restoredDeathRollTournament = persistence.LoadDeathRollTournament();
+        deathRoll = new DeathRollTournamentService(config, party, chatQueue, log, restoredDeathRollTournament);
 
         mainWindow = new MainWindow(config, session, profiles, party, players, ledger, tradeMonitor, dice, chatQueue, overlays, undo, demo, exports, deathRoll, log, OpenSettingsWindow, SetDrtBracketWindowOpen) { IsOpen = config.WindowVisible };
         settingsWindow = new SettingsWindow(config, session, profiles, persistence, log) { IsOpen = config.SettingsWindowVisible };
@@ -69,6 +73,8 @@ public sealed class Plugin : IDalamudPlugin
         DalamudServices.PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
         DalamudServices.PluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
         persistence.SaveNow();
+        persistence.SaveBlackjackSession(session);
+        persistence.SaveDeathRollTournament(deathRoll.Tournament);
     }
 
     private void OnCommand(string command, string arguments) => ToggleMainUi();
@@ -106,10 +112,41 @@ public sealed class Plugin : IDalamudPlugin
 
         if (saveVisibility)
             persistence.SaveNow();
+
+        AutosaveBlackjackSession();
+        AutosaveDeathRollTournament();
+    }
+
+    private void AutosaveBlackjackSession()
+    {
+        if (!config.General.BlackjackSessionAutosaveEnabled)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        if (now < nextBlackjackAutosaveAt)
+            return;
+
+        nextBlackjackAutosaveAt = now.AddSeconds(1);
+        persistence.SaveBlackjackSession(session);
+    }
+
+    private void AutosaveDeathRollTournament()
+    {
+        if (!config.General.DeathRollSessionAutosaveEnabled)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        if (now < nextDeathRollAutosaveAt)
+            return;
+
+        nextDeathRollAutosaveAt = now.AddSeconds(1);
+        persistence.SaveDeathRollTournament(deathRoll.Tournament);
     }
 
     public void Dispose()
     {
+        persistence.SaveBlackjackSession(session);
+        persistence.SaveDeathRollTournament(deathRoll.Tournament);
         persistence.SaveNow();
         DalamudServices.PluginInterface.UiBuilder.Draw -= DrawUi;
         DalamudServices.PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;

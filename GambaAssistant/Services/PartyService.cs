@@ -9,6 +9,7 @@ public sealed class PartyService
 
     public int LastLivePartyMemberCount { get; private set; }
     public DateTime LastSyncUtc { get; private set; }
+    public bool IsLocalPlayerLoaded => DalamudServices.PlayerState.IsLoaded;
 
     public PartyService(LogService log) => this.log = log;
 

@@ -17,14 +17,16 @@ public sealed class DeathRollTournamentService : IDisposable
     private double nextDemoRollTime;
     private readonly Queue<(string Player, int Max)> demoRolls = new();
 
-    public DeathRollTournament Tournament { get; } = new();
+    public DeathRollTournament Tournament { get; }
 
-    public DeathRollTournamentService(Configuration config, PartyService party, ChatQueueService chat, LogService log)
+    public DeathRollTournamentService(Configuration config, PartyService party, ChatQueueService chat, LogService log, DeathRollTournament? tournament = null)
     {
         this.config = config;
         this.party = party;
         this.chat = chat;
         this.log = log;
+        Tournament = tournament ?? new DeathRollTournament();
+        Tournament.NormalizeAfterLoad();
         DalamudServices.ChatGui.ChatMessage += OnChatMessage;
         DalamudServices.Framework.Update += OnFrameworkUpdate;
     }

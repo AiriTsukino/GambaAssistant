@@ -57,6 +57,21 @@ public sealed class GeneralSettingsTab
             UiHelpers.Tooltip("Periodically refreshes battle mode while a Blackjack round is active.");
         });
 
+        UiHelpers.Card("Session Autosave", () =>
+        {
+            ImGui.TextWrapped("Keeps active table state safe across plugin reloads or game crashes. Disable these if you do not want periodic session file saves.");
+
+            var blackjackAutosave = config.General.BlackjackSessionAutosaveEnabled;
+            if (ImGui.Checkbox("Autosave Blackjack table state", ref blackjackAutosave))
+                config.General.BlackjackSessionAutosaveEnabled = blackjackAutosave;
+            UiHelpers.Tooltip("Saves Blackjack players, banks, bets, hands, dealer hand, phase, and ledger state about once per second while enabled.");
+
+            var deathRollAutosave = config.General.DeathRollSessionAutosaveEnabled;
+            if (ImGui.Checkbox("Autosave DRT bracket state", ref deathRollAutosave))
+                config.General.DeathRollSessionAutosaveEnabled = deathRollAutosave;
+            UiHelpers.Tooltip("Saves DRT entrants, bracket, active match, seed rolls, current turn, current max, and match history about once per second while enabled.");
+        });
+
         UiHelpers.Card("Exports", () =>
         {
             ImGui.TextWrapped("Optional custom folder for manual JSON/CSV exports. Leave blank to use the default GambaAssistant Exports folder inside Dalamud pluginConfigs.");

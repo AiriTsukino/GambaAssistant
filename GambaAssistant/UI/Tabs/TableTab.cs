@@ -55,7 +55,7 @@ public sealed class TableTab
 
     private void AutoSyncLiveParty()
     {
-        if (chat.DemoMode)
+        if (chat.DemoMode || !party.IsLocalPlayerLoaded)
             return;
 
         var now = ImGui.GetTime();

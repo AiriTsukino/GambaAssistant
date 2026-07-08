@@ -112,4 +112,96 @@ public sealed class DeathRollTournament
 
     public IEnumerable<DeathRollMatch> AllMatches => Rounds.SelectMany(r => r);
     public DeathRollMatch? ActiveMatch => ActiveMatchId.HasValue ? AllMatches.FirstOrDefault(m => m.Id == ActiveMatchId.Value) : null;
+
+    public void NormalizeForSave()
+    {
+        Entrants ??= new();
+        Rounds ??= new();
+
+        for (var roundIndex = 0; roundIndex < Rounds.Count; roundIndex++)
+        {
+            var round = Rounds[roundIndex] ?? new List<DeathRollMatch>();
+            Rounds[roundIndex] = round;
+
+            for (var matchIndex = 0; matchIndex < round.Count; matchIndex++)
+                NormalizeMatch(round[matchIndex], roundIndex, matchIndex);
+        }
+
+        RelinkMatchPlayers();
+        EnsureActiveMatchIsValid();
+    }
+
+    public void NormalizeAfterLoad() => NormalizeForSave();
+
+    private void NormalizeMatch(DeathRollMatch? match, int roundIndex, int matchIndex)
+    {
+        if (match is null)
+            return;
+
+        if (match.Id == Guid.Empty)
+            match.Id = Guid.NewGuid();
+
+        match.RoundIndex = roundIndex;
+        match.MatchIndex = matchIndex;
+        match.CurrentMax = match.CurrentMax <= 0 ? StartingMax : match.CurrentMax;
+        match.History ??= new();
+    }
+
+    private void RelinkMatchPlayers()
+    {
+        for (var i = 0; i < Entrants.Count; i++)
+            Entrants[i] = CanonicalizePlayer(Entrants[i]) ?? Entrants[i];
+
+        foreach (var match in AllMatches)
+        {
+            match.PlayerA = CanonicalizePlayer(match.PlayerA);
+            match.PlayerB = CanonicalizePlayer(match.PlayerB);
+            match.Winner = CanonicalizePlayer(match.Winner);
+            match.Loser = CanonicalizePlayer(match.Loser);
+            match.CurrentTurn = CanonicalizePlayer(match.CurrentTurn);
+        }
+    }
+
+    private DeathRollPlayer? CanonicalizePlayer(DeathRollPlayer? player)
+    {
+        if (player is null)
+            return null;
+
+        var existing = Entrants.FirstOrDefault(e => SameIdentity(e.Identity, player.Identity));
+        if (existing is null)
+        {
+            Entrants.Add(player);
+            existing = player;
+        }
+
+        existing.Eliminated |= player.Eliminated;
+        return existing;
+    }
+
+    private void EnsureActiveMatchIsValid()
+    {
+        if (Status == DeathRollTournamentStatus.Setup)
+        {
+            ActiveMatchId = null;
+            return;
+        }
+
+        if (ActiveMatch is not null || Status == DeathRollTournamentStatus.Complete)
+            return;
+
+        ActiveMatchId = AllMatches.FirstOrDefault(m =>
+            m.PlayerA is not null &&
+            m.PlayerB is not null &&
+            m.Status is DeathRollMatchStatus.Waiting or DeathRollMatchStatus.SeedingRolls or DeathRollMatchStatus.Playing)?.Id;
+    }
+
+    private static bool SameIdentity(PlayerIdentity a, PlayerIdentity b)
+    {
+        if (!string.Equals(a.Name, b.Name, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return string.IsNullOrWhiteSpace(a.World)
+            || string.IsNullOrWhiteSpace(b.World)
+            || string.Equals(a.World, b.World, StringComparison.OrdinalIgnoreCase);
+    }
 }
