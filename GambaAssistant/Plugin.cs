@@ -54,6 +54,7 @@ public sealed class Plugin : IDalamudPlugin
             players = new PlayerSessionService(session, log);
             ledger = new DealerLedgerService(session, log);
             tradeMonitor = new TradeMonitorService(session, ledger, log);
+            chatQueue.SetActionCommandDelayPredicate(() => tradeMonitor.IsTradeWindowLikelyOpen);
             dice = new DiceService(session, chatQueue, log);
             chatMonitor = new ChatMonitorService(dice, tradeMonitor, log);
             overlays = new OverlayService(config, session, log);
@@ -122,6 +123,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void DrawUi()
     {
+        SafeRun("Poll trade window", () => tradeMonitor.Tick());
         SafeRun("Draw windows", () => windowSystem.Draw());
         SafeRun("Draw overlays", () => overlays.Draw());
 

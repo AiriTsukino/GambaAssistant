@@ -11,6 +11,7 @@ public sealed class PersistenceService : IDisposable
     private readonly Configuration config;
     private readonly string root;
     private readonly JsonSerializerOptions jsonOptions = new() { WriteIndented = true };
+    private readonly object fileWriteLock = new();
     public string ConfigRoot => root;
 
     public PersistenceService(Configuration config)
@@ -56,12 +57,56 @@ public sealed class PersistenceService : IDisposable
     public void SaveJson<T>(string relativePath, T value)
     {
         var path = Path.Combine(root, relativePath);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var directory = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(directory);
 
-        var tempPath = path + ".tmp";
-        File.WriteAllText(tempPath, JsonSerializer.Serialize(value, jsonOptions));
-        File.Copy(tempPath, path, true);
-        File.Delete(tempPath);
+        var json = JsonSerializer.Serialize(value, jsonOptions);
+        lock (fileWriteLock)
+        {
+            SaveJsonAtomic(path, directory, json);
+        }
+    }
+
+    private static void SaveJsonAtomic(string path, string directory, string json)
+    {
+        IOException? lastIoException = null;
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var tempPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+            try
+            {
+                File.WriteAllText(tempPath, json);
+                File.Move(tempPath, path, overwrite: true);
+                return;
+            }
+            catch (IOException ex)
+            {
+                lastIoException = ex;
+                TryDeleteFile(tempPath);
+                Thread.Sleep(35 + attempt * 35);
+            }
+            catch
+            {
+                TryDeleteFile(tempPath);
+                throw;
+            }
+        }
+
+        throw lastIoException ?? new IOException($"Could not save {path}.");
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // Best-effort cleanup only. A future save uses a unique temp path.
+        }
     }
 
     public T? LoadJson<T>(string relativePath)

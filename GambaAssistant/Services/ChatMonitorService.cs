@@ -16,6 +16,9 @@ public sealed class ChatMonitorService : IDisposable
     private string? pendingTradeDirection;
     private DateTime pendingTradeStartedUtc;
     private long pendingTradeLastAmount;
+    private string? recentlyCompletedTradePlayerName;
+    private string? recentlyCompletedTradeDirection;
+    private DateTime recentlyCompletedTradeUtc;
 
     // FFXIV/Dalamud/Chat 2 can expose dice text with slightly different formatting,
     // for example "You roll a 7.", "Airi Tsukino rolls a 7.",
@@ -30,8 +33,10 @@ public sealed class ChatMonitorService : IDisposable
     private static readonly Regex IncomingTradeAmountOnlyRegex = new(@"\b(?:you\s+)?(?:receive|received|have\s+received|obtain|obtained|gain|gained)\s+(?<amount>[\d,]+)\s+gil\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex OutgoingTradeWithNameRegex = new(@"\byou\s+(?:hand\s+over|gave|give|trade|traded|pay|paid)\s+(?<amount>[\d,]+)\s+gil\s+(?:to\s+)?(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex OutgoingTradeAmountOnlyRegex = new(@"\b(?:you\s+)?(?:hand\s+over|gave|give|trade|traded|pay|paid)\s+(?<amount>[\d,]+)\s+gil\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex TradeRequestRegex = new(@"\b(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:wishes|wants|would\s+like)\s+to\s+trade\s+with\s+you\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex OutgoingTradeRequestRegex = new(@"\btrade\s+request\s+sent\s+to\s+(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex TradeRequestRegex = new(@"\b(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:wishes|wants|would\s+like|has\s+sent\s+you\s+a\s+request|sent\s+you\s+a\s+trade\s+request|offers)\s+(?:to\s+)?trade(?:\s+with\s+you)?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex IncomingTradeRequestRegex = new(@"\b(?:trade\s+request\s+from\s+(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)|(?<name2>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\s+(?:has\s+)?sent\s+you\s+(?:a\s+)?trade\s+request)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex OutgoingTradeRequestRegex = new(@"\b(?:trade\s+request\s+sent\s+to|you\s+(?:have\s+)?sent\s+(?:a\s+)?trade\s+request\s+to)\s+(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex TradeWindowWithRegex = new(@"\b(?:now\s+trading\s+with|trading\s+with|trade\s+window\s+with|trade\s+with)\s+(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex AwaitingTradeRegex = new(@"\bawaiting\s+trade\s+confirmation\s+from\s+(?<name>[\p{L}][\p{L}'\-]*(?:\s+[\p{L}][\p{L}'\-]*)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex TradeCompleteRegex = new(@"\btrade\s+complete\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -68,7 +73,7 @@ public sealed class ChatMonitorService : IDisposable
             return;
 
         TryConsumeDice(sender, body, chatType, hasGameDicePayload, payloadSummary);
-        TryDetectTrade(sender, body);
+        TryDetectTrade(sender, body, chatType);
     }
 
     private void TryConsumeDice(string sender, string body, string chatType, bool hasGameDicePayload, string payloadSummary)
@@ -325,8 +330,50 @@ public sealed class ChatMonitorService : IDisposable
         return Regex.Replace(new string(chars), @"\s+", " ").Trim();
     }
 
-    private void TryDetectTrade(string sender, string body)
+    private static bool IsSystemTradeChatLine(string chatType, string sender, string body)
     {
+        var type = chatType.Trim();
+        var cleanedSender = StripChatNoise(sender);
+        var cleanedBody = StripChatNoise(body);
+
+        foreach (var blocked in new[]
+        {
+            "Say", "Yell", "Shout", "Party", "Tell", "FreeCompany", "Linkshell",
+            "CrossLinkShell", "CrossWorldLinkshell", "Alliance", "NoviceNetwork",
+            "PvpTeam", "Echo", "Emote", "CustomEmote"
+        })
+        {
+            if (type.Contains(blocked, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        if (type.Contains("System", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("Log", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("Notice", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(cleanedSender)
+            && !string.Equals(cleanedSender, "System", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return LooksLikeTradeSystemBody(cleanedBody);
+    }
+
+    private static bool LooksLikeTradeSystemBody(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return false;
+
+        return body.Contains("trade", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("You receive", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("You hand over", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void TryDetectTrade(string sender, string body, string chatType)
+    {
+        if (!IsSystemTradeChatLine(chatType, sender, body))
+            return;
+
         var cleanedSender = StripChatNoise(sender);
         var cleanedBody = StripChatNoise(body);
         var combined = string.IsNullOrWhiteSpace(cleanedSender) ? cleanedBody : $"{cleanedSender} {cleanedBody}";
@@ -349,7 +396,8 @@ public sealed class ChatMonitorService : IDisposable
 
             if (!string.IsNullOrWhiteSpace(playerName))
             {
-                trades.AddDetectedIncomingTrade(playerName, namedAmount, "Detected named incoming gil trade from chat/log text");
+                trades.MarkTradeWindowActive(playerName);
+                trades.TryAddDetectedIncomingTrade(playerName, namedAmount, "Detected named incoming gil trade confirmed by Trade window");
                 return;
             }
         }
@@ -357,8 +405,10 @@ public sealed class ChatMonitorService : IDisposable
         var outgoingNamedMatch = OutgoingTradeWithNameRegex.Match(combined);
         if (outgoingNamedMatch.Success && TryParseGilAmount(outgoingNamedMatch.Groups["amount"].Value, out var outgoingNamedAmount))
         {
-            trades.AddDetectedOutgoingTrade(outgoingNamedMatch.Groups["name"].Value, outgoingNamedAmount, "Detected named outgoing gil trade from chat/log text");
+            trades.MarkTradeWindowActive(outgoingNamedMatch.Groups["name"].Value);
+            trades.TryAddSystemConfirmedOutgoingTrade(outgoingNamedMatch.Groups["name"].Value, outgoingNamedAmount, "Detected named outgoing gil trade from trusted system log");
             pendingTradePlayerName = null;
+            pendingTradeDirection = null;
             pendingTradeLastAmount = outgoingNamedAmount;
             return;
         }
@@ -370,10 +420,18 @@ public sealed class ChatMonitorService : IDisposable
         var outgoingAmountOnlyMatch = OutgoingTradeAmountOnlyRegex.Match(combined);
         if (outgoingAmountOnlyMatch.Success && TryParseGilAmount(outgoingAmountOnlyMatch.Groups["amount"].Value, out var outgoingAmountOnly))
         {
-            var outgoingPlayer = GetFreshPendingTradePlayer("outgoing");
+            var outgoingPlayer = GetFreshTradePlayer("outgoing");
             if (!string.IsNullOrWhiteSpace(outgoingPlayer))
             {
-                trades.AddDetectedOutgoingTrade(outgoingPlayer, outgoingAmountOnly, "Detected outgoing gil amount from active trade confirmation sequence");
+                trades.TryAddSystemConfirmedOutgoingTrade(outgoingPlayer, outgoingAmountOnly, "Detected outgoing gil amount from trusted system log and active trade sequence");
+                pendingTradeLastAmount = outgoingAmountOnly;
+                return;
+            }
+
+            var outgoingTargetPlayer = trades.ResolveCurrentTargetTradeCandidate();
+            if (outgoingTargetPlayer is not null)
+            {
+                trades.TryAddSystemConfirmedOutgoingTrade(outgoingTargetPlayer.DisplayName, outgoingAmountOnly, "Detected outgoing gil amount from trusted system log and current trade target");
                 pendingTradeLastAmount = outgoingAmountOnly;
                 return;
             }
@@ -385,7 +443,7 @@ public sealed class ChatMonitorService : IDisposable
                 return;
             }
 
-            trades.AddDetectedOutgoingTrade(singleOutgoingPlayer.DisplayName, outgoingAmountOnly, "Detected outgoing gil amount; attributed to the only eligible tracked player");
+            trades.TryAddSystemConfirmedOutgoingTrade(singleOutgoingPlayer.DisplayName, outgoingAmountOnly, "Detected outgoing gil amount from trusted system log and only eligible tracked player");
             pendingTradeLastAmount = outgoingAmountOnly;
             return;
         }
@@ -408,16 +466,24 @@ public sealed class ChatMonitorService : IDisposable
 
         if (!string.IsNullOrWhiteSpace(cleanedSender) && !NameMatchesDealer(cleanedSender, GetLocalCharacterName()))
         {
-            trades.AddDetectedIncomingTrade(cleanedSender, amountOnly, "Detected incoming gil trade amount; attributed from chat sender");
+            trades.TryAddDetectedIncomingTrade(cleanedSender, amountOnly, "Detected incoming gil amount confirmed by Trade window and chat sender");
             pendingTradePlayerName = null;
             pendingTradeLastAmount = amountOnly;
             return;
         }
 
-        var pendingPlayer = GetFreshPendingTradePlayer("incoming");
+        var pendingPlayer = GetFreshTradePlayer("incoming");
         if (!string.IsNullOrWhiteSpace(pendingPlayer))
         {
-            trades.AddDetectedIncomingTrade(pendingPlayer, amountOnly, "Detected incoming gil amount from active trade confirmation sequence");
+            trades.TryAddDetectedIncomingTrade(pendingPlayer, amountOnly, "Detected incoming gil amount confirmed by Trade window and active trade sequence");
+            pendingTradeLastAmount = amountOnly;
+            return;
+        }
+
+        var targetPlayer = trades.ResolveCurrentTargetTradeCandidate();
+        if (targetPlayer is not null)
+        {
+            trades.TryAddDetectedIncomingTrade(targetPlayer.DisplayName, amountOnly, "Detected incoming gil amount confirmed by Trade window and current trade target");
             pendingTradeLastAmount = amountOnly;
             return;
         }
@@ -429,7 +495,7 @@ public sealed class ChatMonitorService : IDisposable
             return;
         }
 
-        trades.AddDetectedIncomingTrade(singlePlayer.DisplayName, amountOnly, "Detected incoming gil trade amount; attributed to the only eligible tracked player");
+        trades.TryAddDetectedIncomingTrade(singlePlayer.DisplayName, amountOnly, "Detected incoming gil amount confirmed by Trade window and only eligible tracked player");
         pendingTradeLastAmount = amountOnly;
     }
 
@@ -449,14 +515,32 @@ public sealed class ChatMonitorService : IDisposable
             return;
         }
 
+        var incomingRequestMatch = IncomingTradeRequestRegex.Match(combined);
+        if (incomingRequestMatch.Success)
+        {
+            var name = incomingRequestMatch.Groups["name"].Success ? incomingRequestMatch.Groups["name"].Value : incomingRequestMatch.Groups["name2"].Value;
+            SetPendingTradePlayer(name, "incoming trade request", "incoming", sender, body);
+            return;
+        }
+
+        var tradeWindowMatch = TradeWindowWithRegex.Match(combined);
+        if (tradeWindowMatch.Success)
+        {
+            var direction = string.IsNullOrWhiteSpace(pendingTradeDirection) ? "active" : pendingTradeDirection!;
+            SetPendingTradePlayer(tradeWindowMatch.Groups["name"].Value, "trade window", direction, sender, body);
+            return;
+        }
+
         var awaitingMatch = AwaitingTradeRegex.Match(combined);
         if (awaitingMatch.Success)
         {
             var awaitedName = awaitingMatch.Groups["name"].Value;
-            var direction = pendingTradeDirection == "outgoing" && NamesLooselyMatch(pendingTradePlayerName, awaitedName)
+            var direction = string.Equals(pendingTradeDirection, "outgoing", StringComparison.OrdinalIgnoreCase)
                 ? "outgoing"
-                : "incoming";
-            SetPendingTradePlayer(awaitedName, $"{direction} trade confirmation", direction, sender, body);
+                : string.Equals(pendingTradeDirection, "incoming", StringComparison.OrdinalIgnoreCase)
+                    ? "incoming"
+                    : "active";
+            SetPendingTradePlayer(awaitedName, "trade confirmation", direction, sender, body);
             return;
         }
 
@@ -469,9 +553,17 @@ public sealed class ChatMonitorService : IDisposable
                 log.Add(LogCategory.Trades, $"Trade sequence complete for {pendingTradePlayerName}{directionText}{amountText}.");
             }
 
+            if (!string.IsNullOrWhiteSpace(pendingTradePlayerName))
+            {
+                recentlyCompletedTradePlayerName = pendingTradePlayerName;
+                recentlyCompletedTradeDirection = pendingTradeDirection;
+                recentlyCompletedTradeUtc = DateTime.UtcNow;
+            }
+
             pendingTradePlayerName = null;
             pendingTradeDirection = null;
             pendingTradeLastAmount = 0;
+            trades.MarkTradeWindowClosed();
         }
     }
 
@@ -485,28 +577,43 @@ public sealed class ChatMonitorService : IDisposable
         pendingTradeDirection = direction;
         pendingTradeStartedUtc = DateTime.UtcNow;
         pendingTradeLastAmount = 0;
-        var amountDirection = direction == "outgoing" ? "outgoing cash-out" : "incoming buy-in";
-        log.Add(LogCategory.Trades, $"Detected {source} for {name}; the next amount-only {amountDirection} gil line will be attributed to this player. sender='{sender}', body='{body}'.");
+        trades.MarkTradeWindowActive(name);
+        log.Add(LogCategory.Trades, $"Detected {source} for {name}; the next amount-only gil line will be attributed to this player based on whether the log says you received or handed over gil. sender='{sender}', body='{body}'.");
     }
 
-    private string? GetFreshPendingTradePlayer(string expectedDirection)
+    private string? GetFreshTradePlayer(string expectedDirection)
     {
-        if (string.IsNullOrWhiteSpace(pendingTradePlayerName))
-            return null;
+        if (IsFreshTradeAttribution(pendingTradePlayerName, pendingTradeDirection, pendingTradeStartedUtc, TimeSpan.FromMinutes(2), expectedDirection))
+            return pendingTradePlayerName;
 
-        if (!string.Equals(pendingTradeDirection, expectedDirection, StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        if (DateTime.UtcNow - pendingTradeStartedUtc > TimeSpan.FromMinutes(2))
+        if (!string.IsNullOrWhiteSpace(pendingTradePlayerName) && DateTime.UtcNow - pendingTradeStartedUtc > TimeSpan.FromMinutes(2))
         {
-            log.Add(LogCategory.Warnings, $"Ignored stale pending {pendingTradeDirection} trade attribution for {pendingTradePlayerName}; no gil amount was detected within 2 minutes.");
+            log.Add(LogCategory.Warnings, $"Ignored stale pending trade attribution for {pendingTradePlayerName}; no gil amount was detected within 2 minutes.");
             pendingTradePlayerName = null;
             pendingTradeDirection = null;
             pendingTradeLastAmount = 0;
-            return null;
+            trades.MarkTradeWindowClosed();
         }
 
-        return pendingTradePlayerName;
+        if (IsFreshTradeAttribution(recentlyCompletedTradePlayerName, recentlyCompletedTradeDirection, recentlyCompletedTradeUtc, TimeSpan.FromSeconds(10), expectedDirection))
+            return recentlyCompletedTradePlayerName;
+
+        return null;
+    }
+
+    private static bool IsFreshTradeAttribution(string? playerName, string? direction, DateTime startedUtc, TimeSpan maxAge, string expectedDirection)
+    {
+        if (string.IsNullOrWhiteSpace(playerName))
+            return false;
+
+        if (DateTime.UtcNow - startedUtc > maxAge)
+            return false;
+
+        if (string.IsNullOrWhiteSpace(expectedDirection))
+            return true;
+
+        return string.Equals(direction, expectedDirection, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(direction, "active", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool NamesLooselyMatch(string? left, string? right)

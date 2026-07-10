@@ -35,7 +35,7 @@ public sealed class MainWindow : Window
         this.openSettings = openSettings;
         this.config = config;
         SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(900, 620), MaximumSize = new Vector2(float.MaxValue, float.MaxValue) };
-        table = new TableTab(config, session, profiles, party, playerService, ledgerService, dice, chat, undo, log);
+        table = new TableTab(config, session, profiles, party, playerService, ledgerService, dice, chat, overlays, undo, log);
         players = new PlayersTab(session, playerService, ledgerService);
         ledger = new DealerLedgerTab(ledgerService);
         rules = new RulesTab(session, profiles);

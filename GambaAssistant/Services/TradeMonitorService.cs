@@ -1,20 +1,114 @@
+using System.Globalization;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using GambaAssistant.Games.Blackjack;
 using GambaAssistant.Models.Ledger;
 using GambaAssistant.Models.Players;
 
 namespace GambaAssistant.Services;
 
-public sealed class TradeMonitorService
+public sealed unsafe class TradeMonitorService
 {
     private readonly BlackjackSession session;
     private readonly DealerLedgerService ledger;
     private readonly LogService log;
+    private readonly HashSet<long> observedTradeGilAmounts = [];
+    private DateTime tradeWindowLikelyOpenUntilUtc = DateTime.MinValue;
+    private DateTime nextTradeWindowPollAtUtc = DateTime.MinValue;
+    private DateTime lastTradeWindowSeenAtUtc = DateTime.MinValue;
+    private DateTime lastTradeAmountObservedAtUtc = DateTime.MinValue;
+    private string lastObservedTradeAmountSignature = string.Empty;
     public List<TradeEntry> Trades { get; } = [];
-    public string DetectionStatus { get; private set; } = "Trade detection listens for visible client trade/chat log text and applies incoming gil as bank deposits and outgoing gil as cash-outs at any time. Manual entry remains available as a fallback when the client does not expose a stable trade line.";
+    public bool IsTradeWindowLikelyOpen => DateTime.UtcNow < tradeWindowLikelyOpenUntilUtc;
+    public string DetectionStatus { get; private set; } = "Trade detection confirms gil with the real Trade window before applying incoming deposits or outgoing cash-outs. Manual entry remains available as a fallback.";
     public TradeMonitorService(BlackjackSession session, DealerLedgerService ledger, LogService log) { this.session = session; this.ledger = ledger; this.log = log; }
 
     public TradeEntry AddManualTrade(PlayerIdentity from, PlayerIdentity to, long amount, TradeClassification classification, string note = "Manual entry")
         => AddTrade(from, to, amount, classification, note, manual: true);
+
+    public void MarkTradeWindowActive(string? playerName = null)
+    {
+        tradeWindowLikelyOpenUntilUtc = DateTime.UtcNow.AddSeconds(30);
+        if (!string.IsNullOrWhiteSpace(playerName))
+            log.Add(LogCategory.Trades, $"Trade window activity detected for {playerName}.");
+    }
+
+    public void MarkTradeWindowClosed()
+    {
+        tradeWindowLikelyOpenUntilUtc = DateTime.MinValue;
+        observedTradeGilAmounts.Clear();
+        lastTradeAmountObservedAtUtc = DateTime.MinValue;
+        lastObservedTradeAmountSignature = string.Empty;
+    }
+
+    public void Tick()
+    {
+        var now = DateTime.UtcNow;
+        if (now < nextTradeWindowPollAtUtc)
+            return;
+
+        nextTradeWindowPollAtUtc = now.AddMilliseconds(250);
+
+        if (!TryReadTradeWindowAmounts(out var amounts, out var diagnosticText))
+        {
+            if (now - lastTradeWindowSeenAtUtc > TimeSpan.FromSeconds(2))
+                observedTradeGilAmounts.Clear();
+            return;
+        }
+
+        lastTradeWindowSeenAtUtc = now;
+        tradeWindowLikelyOpenUntilUtc = now.AddSeconds(3);
+
+        if (amounts.Count == 0)
+            return;
+
+        observedTradeGilAmounts.Clear();
+        foreach (var amount in amounts)
+            observedTradeGilAmounts.Add(amount);
+
+        lastTradeAmountObservedAtUtc = now;
+        var signature = string.Join("|", observedTradeGilAmounts.OrderBy(x => x));
+        if (!string.Equals(signature, lastObservedTradeAmountSignature, StringComparison.Ordinal))
+        {
+            lastObservedTradeAmountSignature = signature;
+            log.Add(LogCategory.Trades, $"Trade window gil observed: {string.Join(", ", observedTradeGilAmounts.OrderBy(x => x).Select(x => x.ToString("N0", CultureInfo.InvariantCulture)))}.");
+        }
+    }
+
+    public bool TryAddDetectedIncomingTrade(string playerName, long amount, string note = "Detected confirmed incoming gil trade")
+    {
+        if (!IsGilAmountConfirmedByTradeWindow(amount, out var reason))
+        {
+            log.Add(LogCategory.Warnings, $"Ignored incoming gil line for {playerName}: {amount:N0} gil was not confirmed by the Trade window. {reason}");
+            return false;
+        }
+
+        AddDetectedIncomingTrade(playerName, amount, note);
+        return true;
+    }
+
+    public bool TryAddDetectedOutgoingTrade(string playerName, long amount, string note = "Detected confirmed outgoing gil trade")
+    {
+        if (!IsGilAmountConfirmedByTradeWindow(amount, out var reason))
+        {
+            log.Add(LogCategory.Warnings, $"Ignored outgoing gil line for {playerName}: {amount:N0} gil was not confirmed by the Trade window. {reason}");
+            return false;
+        }
+
+        AddDetectedOutgoingTrade(playerName, amount, note);
+        return true;
+    }
+
+    public bool TryAddSystemConfirmedOutgoingTrade(string playerName, long amount, string note = "Detected confirmed outgoing gil trade from system log")
+    {
+        if (amount <= 0)
+        {
+            log.Add(LogCategory.Warnings, $"Ignored outgoing gil line for {playerName}: amount was not positive.");
+            return false;
+        }
+
+        AddDetectedOutgoingTrade(playerName, amount, note);
+        return true;
+    }
 
     public TradeEntry AddDetectedIncomingTrade(string playerName, long amount, string note = "Detected from chat/log text")
     {
@@ -46,6 +140,114 @@ public sealed class TradeMonitorService
         // players cash out mid-round or between hands without phase-specific
         // bookkeeping blocking the bank update.
         return AddTrade(dealer.Identity, player.Identity, amount, TradeClassification.CashOut, note, manual: false);
+    }
+
+    private bool IsGilAmountConfirmedByTradeWindow(long amount, out string reason)
+    {
+        reason = string.Empty;
+        if (amount <= 0)
+        {
+            reason = "Amount was not positive.";
+            return false;
+        }
+
+        Tick();
+        var now = DateTime.UtcNow;
+        if (now - lastTradeAmountObservedAtUtc > TimeSpan.FromSeconds(12))
+        {
+            reason = "No recent Trade window gil amount was observed.";
+            return false;
+        }
+
+        if (observedTradeGilAmounts.Contains(amount))
+            return true;
+
+        reason = observedTradeGilAmounts.Count == 0
+            ? "The Trade window was observed, but no gil amount was visible."
+            : $"Recent Trade window amounts were: {string.Join(", ", observedTradeGilAmounts.OrderBy(x => x).Select(x => x.ToString("N0", CultureInfo.InvariantCulture)))}.";
+        return false;
+    }
+
+    private static bool TryReadTradeWindowAmounts(out HashSet<long> amounts, out string diagnosticText)
+    {
+        amounts = [];
+        diagnosticText = string.Empty;
+
+        if (!TryGetTradeAddon(out var tradeAddon))
+            return false;
+
+        var nodeList = tradeAddon->UldManager.NodeList;
+        var nodeCount = Math.Min((int)tradeAddon->UldManager.NodeListCount, 512);
+        if (nodeList is null || nodeCount <= 0)
+            return true;
+
+        var textParts = new List<string>();
+        for (var i = 0; i < nodeCount; i++)
+        {
+            var node = nodeList[i];
+            if (node is null || (uint)node->Type != 3)
+                continue;
+
+            var textNode = node->GetAsAtkTextNode();
+            if (textNode is null)
+                continue;
+
+            var text = CleanTradeWindowText(textNode->NodeText.ToString());
+            if (string.IsNullOrWhiteSpace(text))
+                continue;
+
+            textParts.Add(text);
+            foreach (var amount in ReadPositiveGilLikeNumbers(text))
+                amounts.Add(amount);
+        }
+
+        diagnosticText = string.Join(" | ", textParts.Take(8));
+        return true;
+    }
+
+    private static bool TryGetTradeAddon(out AtkUnitBase* addon)
+    {
+        addon = null;
+        try
+        {
+            var addonPtr = DalamudServices.GameGui.GetAddonByName("Trade");
+            if (addonPtr.Address == nint.Zero)
+                return false;
+
+            addon = (AtkUnitBase*)addonPtr.Address;
+            return addon is not null && addon->IsVisible && addon->IsReady;
+        }
+        catch
+        {
+            addon = null;
+            return false;
+        }
+    }
+
+    private static string CleanTradeWindowText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        var cleaned = new string(text
+            .Replace(' ', ' ')
+            .Where(c => !char.IsControl(c))
+            .ToArray());
+
+        return string.Join(" ", cleaned.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).Trim();
+    }
+
+    private static IEnumerable<long> ReadPositiveGilLikeNumbers(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            yield break;
+
+        foreach (var match in System.Text.RegularExpressions.Regex.Matches(text, @"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})+|\d+)(?![A-Za-z0-9])").Cast<System.Text.RegularExpressions.Match>())
+        {
+            var raw = match.Value.Replace(",", string.Empty);
+            if (long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) && value > 0)
+                yield return value;
+        }
     }
 
     public void Reclassify(TradeEntry entry, TradeClassification classification, string note)
@@ -112,13 +314,47 @@ public sealed class TradeMonitorService
         if (string.IsNullOrWhiteSpace(normalized))
             return null;
 
-        return session.SessionPlayers.FirstOrDefault(p =>
+        var exact = session.SessionPlayers.FirstOrDefault(p =>
             NormalizeName(p.Identity.Name) == normalized
-            || NormalizeName(p.DisplayName) == normalized
-            || NormalizeName(p.DisplayName).StartsWith(normalized + "@")
-            || normalized.StartsWith(NormalizeName(p.Identity.Name) + " ")
-            || normalized.Contains(NormalizeName(p.DisplayName))
-            || NormalizeName(p.DisplayName).Contains(normalized));
+            || NormalizeName(p.DisplayName) == normalized);
+        if (exact is not null)
+            return exact;
+
+        var compact = normalized.Replace(" ", string.Empty);
+        return session.SessionPlayers
+            .Where(p => p.Status != PlayerStatus.Dealer)
+            .FirstOrDefault(p =>
+            {
+                var identityName = NormalizeName(p.Identity.Name);
+                var displayName = NormalizeName(p.DisplayName);
+                var identityCompact = identityName.Replace(" ", string.Empty);
+                var displayCompact = displayName.Replace(" ", string.Empty);
+
+                return displayName.StartsWith(normalized + "@", StringComparison.OrdinalIgnoreCase)
+                    || normalized.StartsWith(identityName + " ", StringComparison.OrdinalIgnoreCase)
+                    || normalized.Contains(displayName, StringComparison.OrdinalIgnoreCase)
+                    || displayName.Contains(normalized, StringComparison.OrdinalIgnoreCase)
+                    || compact == identityCompact
+                    || compact == displayCompact;
+            });
+    }
+
+    public PlayerSessionState? ResolveTrackedTradeCandidateByName(string name) => FindPlayerByName(name);
+
+    public PlayerSessionState? ResolveCurrentTargetTradeCandidate()
+    {
+        try
+        {
+            var targetName = DalamudServices.TargetManager.Target?.Name.TextValue.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(targetName))
+                return null;
+
+            return FindPlayerByName(targetName);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public PlayerSessionState? ResolveSingleActivePartyPlayer() => ResolveSingleTrackedTradeCandidate();
@@ -167,6 +403,10 @@ public sealed class TradeMonitorService
 
         if (session.SessionPlayers.Any(p => p.Status == PlayerStatus.Dealer && NamesLooselyMatch(p.DisplayName, identity.Display)))
             return null;
+
+        var existing = FindPlayerByName(identity.Display) ?? FindPlayerByName(identity.Name);
+        if (existing is not null)
+            return existing;
 
         var nextSlot = Math.Max(2, session.SessionPlayers.Where(p => p.Status != PlayerStatus.Dealer).Select(p => p.PartySlot).DefaultIfEmpty(1).Max() + 1);
         var player = new PlayerSessionState
@@ -219,5 +459,27 @@ public sealed class TradeMonitorService
             && (a == b || a.Contains(b, StringComparison.OrdinalIgnoreCase) || b.Contains(a, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string NormalizeName(string value) => value.Trim().Replace("@", " ").Replace("  ", " ").ToLowerInvariant();
+    private static string NormalizeName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var characterName = value.Trim();
+        var atIndex = characterName.IndexOf('@', StringComparison.Ordinal);
+        if (atIndex >= 0)
+            characterName = characterName[..atIndex];
+
+        Span<char> buffer = stackalloc char[Math.Min(characterName.Length, 64)];
+        var count = 0;
+        foreach (var ch in characterName)
+        {
+            if (!char.IsLetterOrDigit(ch))
+                continue;
+            if (count >= buffer.Length)
+                break;
+            buffer[count++] = char.ToLowerInvariant(ch);
+        }
+
+        return new string(buffer[..count]);
+    }
 }

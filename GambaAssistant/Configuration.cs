@@ -35,6 +35,7 @@ public sealed class OverlaySettings
 {
     public bool Enabled { get; set; } = true;
     public bool Compact { get; set; } = true;
+    public int PlayerPanelColumns { get; set; } = 1;
     public float TextScale { get; set; } = 1.0f;
     public float VerticalOffset { get; set; } = 1.15f;
     public Dictionary<string, float> PlayerHeightOffsets { get; set; } = new(StringComparer.OrdinalIgnoreCase);

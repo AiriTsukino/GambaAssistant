@@ -11,7 +11,8 @@ public sealed class PlayerSessionService
 
     public void SyncParty(IEnumerable<PlayerSessionState> partyOrder)
     {
-        var partyList = partyOrder.ToList();
+        NormalizeTrackedPlayers();
+        var partyList = DeduplicatePartyOrder(partyOrder.ToList());
         var dealer = partyList.FirstOrDefault(p => p.Status == PlayerStatus.Dealer);
         if (dealer is not null)
             SyncDealer(dealer);
@@ -26,20 +27,13 @@ public sealed class PlayerSessionService
             }
             else
             {
-                if (string.IsNullOrWhiteSpace(existing.Identity.World) && !string.IsNullOrWhiteSpace(partyPlayer.Identity.World))
-                    existing.Identity = partyPlayer.Identity;
-
-                existing.PartySlot = partyPlayer.PartySlot;
-                if ((existing.Status is PlayerStatus.LeftDisconnected or PlayerStatus.SittingOut) && ShouldRestoreRoundPlayerAsPlaying(existing))
-                    existing.Status = PlayerStatus.Playing;
-                else if (existing.Status == PlayerStatus.LeftDisconnected)
-                    existing.Status = PlayerStatus.SittingOut;
+                MergeLivePartyIdentity(existing, partyPlayer);
             }
         }
 
         foreach (var existing in session.SessionPlayers.Where(p => p.Status != PlayerStatus.Dealer).ToList())
         {
-            if (partyList.All(p => p.Status == PlayerStatus.Dealer || !IsSamePlayerForSync(p.Identity, existing.Identity)) && existing.Status != PlayerStatus.CashedOut)
+            if (partyList.All(p => p.Status == PlayerStatus.Dealer || (!IsSamePlayerForSync(p.Identity, existing.Identity) && !IsSameNormalizedName(p.Identity, existing.Identity))) && existing.Status != PlayerStatus.CashedOut)
             {
                 existing.Status = PlayerStatus.LeftDisconnected;
 
@@ -47,19 +41,22 @@ public sealed class PlayerSessionService
                     RemovePlayer(existing, "Auto-removed disconnected player with 0 tracked gil.");
             }
         }
+
+        NormalizeTrackedPlayers();
         session.SessionPlayers.Sort((a,b) => a.PartySlot.CompareTo(b.PartySlot));
     }
 
     public void RemovePlayer(PlayerSessionState player, string reason = "Removed from table")
     {
         VoidActiveHandsForDisconnected(player);
-        session.Round.Players.RemoveAll(p => IsSamePlayerForSync(p.Identity, player.Identity));
+        session.Round.Players.RemoveAll(p => IsSamePlayerForSync(p.Identity, player.Identity) || IsSameNormalizedName(p.Identity, player.Identity));
         if (session.Round.ActivePlayerIndex >= session.Round.Players.Count)
             session.Round.ActivePlayerIndex = Math.Max(0, session.Round.Players.Count - 1);
         if (session.Round.Players.Count == 0 && session.Round.Phase is not BlackjackPhase.Idle)
             session.Round.Phase = BlackjackPhase.CashOutBetweenHands;
 
-        session.SessionPlayers.RemoveAll(p => IsSamePlayerForSync(p.Identity, player.Identity));
+        session.SessionPlayers.RemoveAll(p => IsSamePlayerForSync(p.Identity, player.Identity) || IsSameNormalizedName(p.Identity, player.Identity));
+        NormalizeTrackedPlayers();
         log.Add(LogCategory.Info, $"{reason}: {player.DisplayName}.");
     }
 
@@ -139,7 +136,137 @@ public sealed class PlayerSessionService
         => session.Round.Players.Any(p => IsSamePlayerForSync(p.Identity, player.Identity));
 
     private PlayerSessionState? FindExistingPlayerForPartySync(PlayerIdentity identity)
-        => session.SessionPlayers.FirstOrDefault(p => p.Status != PlayerStatus.Dealer && IsSamePlayerForSync(p.Identity, identity));
+        => session.SessionPlayers.FirstOrDefault(p => p.Status != PlayerStatus.Dealer && IsSamePlayerForSync(p.Identity, identity))
+           ?? session.SessionPlayers.FirstOrDefault(p => p.Status != PlayerStatus.Dealer && IsSameNormalizedName(p.Identity, identity));
+
+    private void MergeLivePartyIdentity(PlayerSessionState existing, PlayerSessionState livePartyPlayer)
+    {
+        if (string.IsNullOrWhiteSpace(existing.Identity.World) && !string.IsNullOrWhiteSpace(livePartyPlayer.Identity.World))
+            existing.Identity = livePartyPlayer.Identity;
+
+        existing.PartySlot = livePartyPlayer.PartySlot;
+        if ((existing.Status is PlayerStatus.LeftDisconnected or PlayerStatus.SittingOut) && ShouldRestoreRoundPlayerAsPlaying(existing))
+            existing.Status = PlayerStatus.Playing;
+        else if (existing.Status == PlayerStatus.LeftDisconnected)
+            existing.Status = PlayerStatus.SittingOut;
+    }
+
+    private void NormalizeTrackedPlayers()
+    {
+        foreach (var group in session.SessionPlayers
+            .Where(p => p.Status != PlayerStatus.Dealer)
+            .GroupBy(p => NormalizeName(p.Identity.Name))
+            .Where(g => !string.IsNullOrWhiteSpace(g.Key) && g.Count() > 1)
+            .ToList())
+        {
+            var players = group.ToList();
+            var primary = players
+                .OrderByDescending(IsCurrentRoundPlayer)
+                .ThenByDescending(HasActiveRoundState)
+                .ThenByDescending(p => !string.IsNullOrWhiteSpace(p.Identity.World))
+                .ThenBy(p => p.PartySlot <= 0 ? int.MaxValue : p.PartySlot)
+                .First();
+
+            foreach (var duplicate in players.Where(p => !ReferenceEquals(p, primary)).ToList())
+            {
+                MergeDuplicateIntoPrimary(primary, duplicate);
+                session.Round.Players = session.Round.Players
+                    .Select(p => ReferenceEquals(p, duplicate) || IsSameNormalizedName(p.Identity, duplicate.Identity) ? primary : p)
+                    .Distinct(ReferenceEqualityComparer<PlayerSessionState>.Instance)
+                    .ToList();
+                session.SessionPlayers.Remove(duplicate);
+                log.Add(LogCategory.Warnings, $"Removed duplicate Blackjack table entry for {duplicate.DisplayName}; kept {primary.DisplayName}.");
+            }
+        }
+    }
+
+    private static List<PlayerSessionState> DeduplicatePartyOrder(List<PlayerSessionState> partyList)
+    {
+        var result = new List<PlayerSessionState>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var player in partyList)
+        {
+            var key = player.Status == PlayerStatus.Dealer ? $"dealer:{NormalizeName(player.Identity.Name)}" : NormalizeName(player.Identity.Name);
+            if (string.IsNullOrWhiteSpace(key) || seen.Add(key))
+                result.Add(player);
+        }
+
+        return result;
+    }
+
+    private void MergeDuplicateIntoPrimary(PlayerSessionState primary, PlayerSessionState duplicate)
+    {
+        if (string.IsNullOrWhiteSpace(primary.Identity.World) && !string.IsNullOrWhiteSpace(duplicate.Identity.World))
+            primary.Identity = duplicate.Identity;
+
+        if ((primary.PartySlot <= 0 || duplicate.PartySlot < primary.PartySlot) && duplicate.PartySlot > 0)
+            primary.PartySlot = duplicate.PartySlot;
+
+        if (duplicate.Bank.TotalTracked > primary.Bank.TotalTracked)
+            primary.Bank = duplicate.Bank;
+        else if (primary.Bank.LastTradeAmount <= 0 && duplicate.Bank.LastTradeAmount > 0)
+            primary.Bank.LastTradeAmount = duplicate.Bank.LastTradeAmount;
+
+        if (!primary.BetConfirmed && duplicate.BetConfirmed)
+            primary.BetConfirmed = true;
+
+        if (primary.Hands.Count == 0 && duplicate.Hands.Count > 0)
+            primary.Hands = duplicate.Hands;
+
+        if (duplicate.RoundHistory.Count > 0)
+            primary.RoundHistory.AddRange(duplicate.RoundHistory);
+
+        if (StatusPriority(duplicate.Status) > StatusPriority(primary.Status))
+            primary.Status = duplicate.Status;
+    }
+
+    private bool HasActiveRoundState(PlayerSessionState player)
+        => player.BetConfirmed || player.Bank.ActiveBet > 0 || player.Hands.Any(h => !h.IsVoided && h.Cards.Count > 0);
+
+    private static int StatusPriority(PlayerStatus status) => status switch
+    {
+        PlayerStatus.Playing => 5,
+        PlayerStatus.SittingOut => 4,
+        PlayerStatus.LeftDisconnected => 3,
+        PlayerStatus.CashedOut => 2,
+        PlayerStatus.SpectatorStaff => 1,
+        _ => 0
+    };
+
+    private static bool IsSameNormalizedName(PlayerIdentity a, PlayerIdentity b)
+        => !string.IsNullOrWhiteSpace(NormalizeName(a.Name))
+           && string.Equals(NormalizeName(a.Name), NormalizeName(b.Name), StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var characterName = value.Trim();
+        var atIndex = characterName.IndexOf('@', StringComparison.Ordinal);
+        if (atIndex >= 0)
+            characterName = characterName[..atIndex];
+
+        Span<char> buffer = stackalloc char[Math.Min(characterName.Length, 64)];
+        var count = 0;
+        foreach (var ch in characterName)
+        {
+            if (!char.IsLetterOrDigit(ch))
+                continue;
+            if (count >= buffer.Length)
+                break;
+            buffer[count++] = char.ToLowerInvariant(ch);
+        }
+
+        return new string(buffer[..count]);
+    }
+
+    private sealed class ReferenceEqualityComparer<T> : IEqualityComparer<T> where T : class
+    {
+        public static ReferenceEqualityComparer<T> Instance { get; } = new();
+        public bool Equals(T? x, T? y) => ReferenceEquals(x, y);
+        public int GetHashCode(T obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+    }
 
     private static bool IsSamePlayerForSync(PlayerIdentity a, PlayerIdentity b)
     {

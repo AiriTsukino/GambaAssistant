@@ -28,7 +28,7 @@ public sealed class TableTab
     private string? lastAstrologianBeneficTurnKey;
     private double nextAstrologianBattleModeRefreshTime;
 
-    public TableTab(Configuration config, BlackjackSession session, ProfileService profiles, PartyService party, PlayerSessionService players, DealerLedgerService dealerLedger, DiceService dice, ChatQueueService chat, UndoService undo, LogService log)
+    public TableTab(Configuration config, BlackjackSession session, ProfileService profiles, PartyService party, PlayerSessionService players, DealerLedgerService dealerLedger, DiceService dice, ChatQueueService chat, OverlayService overlays, UndoService undo, LogService log)
     {
         this.config = config;
         this.session = session;
@@ -40,6 +40,7 @@ public sealed class TableTab
         this.chat = chat;
         this.undo = undo;
         this.log = log;
+        overlays.SetBlackjackActionCallbacks(HitActiveHand, StandActiveHand, DoubleDownActiveHand, SplitActiveHand);
     }
 
     public void Draw()
@@ -303,6 +304,63 @@ public sealed class TableTab
             DrawWrappedText($"{marker}Hand {h.HandNumber}: {h.CardText} = {h.TotalText} | Bet {h.Bet:N0} | {HandStatus(h)}");
         }
         ImGui.Unindent(12f);
+    }
+
+    private bool TryGetActivePlayerHand(out PlayerSessionState player, out BlackjackHand hand)
+    {
+        player = null!;
+        hand = null!;
+
+        if (session.Round.Phase != BlackjackPhase.PlayerTurns || session.ActivePlayer is not { } activePlayer || session.ActiveHand is not { } activeHand)
+            return false;
+
+        player = activePlayer;
+        hand = activeHand;
+        return true;
+    }
+
+    private void HitActiveHand()
+    {
+        if (!TryGetActivePlayerHand(out var player, out var hand))
+        {
+            log.Add(LogCategory.Warnings, "No active Blackjack hand is available to hit.");
+            return;
+        }
+
+        RequestCard(player, hand, "Hit", undoable: true);
+    }
+
+    private void StandActiveHand()
+    {
+        if (!TryGetActivePlayerHand(out _, out var hand))
+        {
+            log.Add(LogCategory.Warnings, "No active Blackjack hand is available to stand.");
+            return;
+        }
+
+        Stand(hand);
+    }
+
+    private void DoubleDownActiveHand()
+    {
+        if (!TryGetActivePlayerHand(out var player, out var hand))
+        {
+            log.Add(LogCategory.Warnings, "No active Blackjack hand is available to double down.");
+            return;
+        }
+
+        DoubleDown(player, hand);
+    }
+
+    private void SplitActiveHand()
+    {
+        if (!TryGetActivePlayerHand(out var player, out var hand))
+        {
+            log.Add(LogCategory.Warnings, "No active Blackjack hand is available to split.");
+            return;
+        }
+
+        Split(player, hand);
     }
 
     private void DrawActiveHandControls(PlayerSessionState p)
@@ -653,15 +711,24 @@ public sealed class TableTab
         if (string.Equals(lastAstrologianBeneficTurnKey, turnKey, StringComparison.Ordinal))
             return;
 
-        var targetName = GetTargetableCharacterName(player);
-        if (string.IsNullOrWhiteSpace(targetName))
+        var targetCommand = BuildAstrologianTargetCommand(player);
+        if (string.IsNullOrWhiteSpace(targetCommand))
             return;
 
         lastAstrologianBeneficTurnKey = turnKey;
-        chat.EnqueueCommand($"/target \"{targetName}\"");
+        chat.EnqueueCommand(targetCommand, false, Math.Max(1.0f, config.General.ChatQueueDelaySeconds));
         chat.EnqueueCommand("/ac \"Benefic\" <t>");
         QueueAstrologianBattleModeOn();
-        log.Add(LogCategory.ChatQueue, $"Astrologian Benefic queued for {player.DisplayName} {GetHandLabel(player, hand)}.");
+        log.Add(LogCategory.ChatQueue, $"Astrologian target and Benefic queued for {player.DisplayName} {GetHandLabel(player, hand)}.");
+    }
+
+    private static string BuildAstrologianTargetCommand(PlayerSessionState player)
+    {
+        if (player.PartySlot is >= 2 and <= 8)
+            return $"/target <{player.PartySlot}>";
+
+        var targetName = GetTargetableCharacterName(player);
+        return string.IsNullOrWhiteSpace(targetName) ? string.Empty : $"/target \"{targetName}\"";
     }
 
     private static string GetTargetableCharacterName(PlayerSessionState player)

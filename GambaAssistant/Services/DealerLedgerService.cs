@@ -13,7 +13,8 @@ public sealed class DealerLedgerService
 
     public long OutstandingPlayerBanks => session.SessionPlayers
         .Where(p => p.Status != PlayerStatus.Dealer)
-        .Sum(p => p.Bank.TotalTracked);
+        .GroupBy(p => NormalizeName(p.Identity.Name))
+        .Sum(g => g.Max(p => p.Bank.TotalTracked));
 
     public long LiveGameProfitLoss => Ledger.TotalBuyInsDeposits - Ledger.TotalCashOuts - OutstandingPlayerBanks;
 
@@ -26,6 +27,30 @@ public sealed class DealerLedgerService
     public long? Difference => Ledger.ActualEndingGil.HasValue
         ? Ledger.ActualEndingGil.Value - ExpectedDealerGil
         : null;
+
+    private static string NormalizeName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var characterName = value.Trim();
+        var atIndex = characterName.IndexOf('@', StringComparison.Ordinal);
+        if (atIndex >= 0)
+            characterName = characterName[..atIndex];
+
+        Span<char> buffer = stackalloc char[Math.Min(characterName.Length, 64)];
+        var count = 0;
+        foreach (var ch in characterName)
+        {
+            if (!char.IsLetterOrDigit(ch))
+                continue;
+            if (count >= buffer.Length)
+                break;
+            buffer[count++] = char.ToLowerInvariant(ch);
+        }
+
+        return new string(buffer[..count]);
+    }
 
     public void RecordTrade(TradeEntry entry)
     {

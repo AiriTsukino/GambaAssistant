@@ -27,6 +27,12 @@ public sealed class OverlaySettingsTab
             if (ImGui.Checkbox("Compact mode", ref compact))
                 config.Overlay.Compact = compact;
 
+            var panelColumns = Math.Clamp(config.Overlay.PlayerPanelColumns, 1, 8);
+            ImGui.SetNextItemWidth(140f);
+            if (ImGui.SliderInt("Player panels wide", ref panelColumns, 1, 8))
+                config.Overlay.PlayerPanelColumns = Math.Clamp(panelColumns, 1, 8);
+            UiHelpers.Help("Controls how many player panels appear per row in the normal movable Blackjack overlay. Use 2 for a 2x4 style full-party layout or 4 for a 4x2 style layout.");
+
             var drawn = config.Overlay.UseDrawnOverhead;
             if (ImGui.Checkbox("Use drawn overhead overlays", ref drawn))
                 config.Overlay.UseDrawnOverhead = drawn;

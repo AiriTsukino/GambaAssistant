@@ -10,6 +10,8 @@ public sealed class ChatQueueService : IDisposable
     private readonly ConcurrentQueue<ChatQueueItem> queue = new();
     private readonly NativeChatSender nativeChat;
     private DateTimeOffset nextSend = DateTimeOffset.MinValue;
+    private DateTimeOffset nextActionCommandDelayLog = DateTimeOffset.MinValue;
+    private Func<bool>? shouldDelayActionCommands;
     public bool Paused { get; private set; }
     public int Count => queue.Count;
     public string Status => Paused ? $"Paused ({Count} queued)" : Count == 0 ? "Idle" : $"Queued: {Count}";
@@ -43,7 +45,9 @@ public sealed class ChatQueueService : IDisposable
         var channel = NormalizeChatChannel(config.DeathRoll.ChatChannel);
         queue.Enqueue(new ChatQueueItem($"{channel} {message}", false, DeathRollDelaySeconds));
     }
-    public void EnqueueCommand(string command, bool diceCommand = false) => queue.Enqueue(new ChatQueueItem(command, diceCommand, EffectiveDelaySeconds));
+    public void EnqueueCommand(string command, bool diceCommand = false) => EnqueueCommand(command, diceCommand, EffectiveDelaySeconds);
+    public void EnqueueCommand(string command, bool diceCommand, float delaySeconds) => queue.Enqueue(new ChatQueueItem(command, diceCommand, Math.Max(0.2f, delaySeconds), true));
+    public void SetActionCommandDelayPredicate(Func<bool>? predicate) => shouldDelayActionCommands = predicate;
     public void EnqueueDeathRollCommand(string command, bool diceCommand = false)
     {
         if (config.DeathRoll.DisableChatBroadcasts)
@@ -69,7 +73,21 @@ public sealed class ChatQueueService : IDisposable
 
     private void OnFrameworkUpdate(IFramework framework)
     {
-        if (Paused || queue.IsEmpty || DateTimeOffset.Now < nextSend) return;
+        var now = DateTimeOffset.Now;
+        if (Paused || queue.IsEmpty || now < nextSend) return;
+        if (!queue.TryPeek(out var pending)) return;
+
+        if (ShouldDelayActionCommand(pending))
+        {
+            nextSend = now.AddMilliseconds(500);
+            if (now >= nextActionCommandDelayLog)
+            {
+                nextActionCommandDelayLog = now.AddSeconds(10);
+                log.Add(LogCategory.ChatQueue, "Delayed Blackjack action command while a trade appears to be active.");
+            }
+            return;
+        }
+
         if (!queue.TryDequeue(out var item)) return;
         if (DemoMode)
         {
@@ -88,7 +106,23 @@ public sealed class ChatQueueService : IDisposable
         nextSend = DateTimeOffset.Now.AddSeconds(Math.Max(0.2f, item.DelaySeconds));
     }
 
+    private bool ShouldDelayActionCommand(ChatQueueItem item)
+    {
+        if (!item.DelayDuringTrade || shouldDelayActionCommands?.Invoke() != true)
+            return false;
+
+        if (item.IsDiceCommand)
+            return true;
+
+        var command = item.Command.TrimStart();
+        return command.StartsWith("/ac ", StringComparison.OrdinalIgnoreCase)
+            || command.StartsWith("/target ", StringComparison.OrdinalIgnoreCase)
+            || command.StartsWith("/battlemode", StringComparison.OrdinalIgnoreCase)
+            || command.StartsWith("/dice", StringComparison.OrdinalIgnoreCase)
+            || command.StartsWith("/facetarget", StringComparison.OrdinalIgnoreCase);
+    }
+
     public void Dispose() => DalamudServices.Framework.Update -= OnFrameworkUpdate;
 }
 
-public sealed record ChatQueueItem(string Command, bool IsDiceCommand, float DelaySeconds);
+public sealed record ChatQueueItem(string Command, bool IsDiceCommand, float DelaySeconds, bool DelayDuringTrade = false);

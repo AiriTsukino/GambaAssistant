@@ -36,7 +36,12 @@ public sealed class BlackjackSession : IGameSession
         SessionPlayers ??= [];
         Round.Players ??= [];
         Round.DealerHand ??= new BlackjackHand { HandNumber = 0 };
+        foreach (var player in SessionPlayers)
+            EnsurePlayerState(player);
+        foreach (var player in Round.Players)
+            EnsurePlayerState(player);
         NormalizeDealerEntries();
+        NormalizeDuplicatePlayers();
     }
 
     public void NormalizeAfterLoad()
@@ -70,6 +75,7 @@ public sealed class BlackjackSession : IGameSession
         }
 
         NormalizeDealerEntries();
+        NormalizeDuplicatePlayers();
         RestoreRoundPlayerStatuses();
 
         if (Round.ActivePlayerIndex < 0)
@@ -83,6 +89,108 @@ public sealed class BlackjackSession : IGameSession
             Round.ActiveHandIndex = 0;
         if (ActivePlayer is { } activePlayer && activePlayer.Hands.Count > 0 && Round.ActiveHandIndex >= activePlayer.Hands.Count)
             Round.ActiveHandIndex = activePlayer.Hands.Count - 1;
+    }
+
+    private void NormalizeDuplicatePlayers()
+    {
+        foreach (var group in SessionPlayers
+            .Where(p => p.Status != PlayerStatus.Dealer)
+            .GroupBy(p => NormalizeName(p.Identity.Name))
+            .Where(g => !string.IsNullOrWhiteSpace(g.Key) && g.Count() > 1)
+            .ToList())
+        {
+            var players = group.ToList();
+            var primary = players
+                .OrderByDescending(p => Round.Players.Any(rp => IsSamePlayer(rp.Identity, p.Identity)))
+                .ThenByDescending(HasActiveRoundState)
+                .ThenByDescending(p => !string.IsNullOrWhiteSpace(p.Identity.World))
+                .ThenBy(p => p.PartySlot <= 0 ? int.MaxValue : p.PartySlot)
+                .First();
+
+            foreach (var duplicate in players.Where(p => !ReferenceEquals(p, primary)).ToList())
+            {
+                MergeDuplicateIntoPrimary(primary, duplicate);
+                Round.Players = Round.Players
+                    .Select(p => ReferenceEquals(p, duplicate) || IsSameNormalizedName(p.Identity, duplicate.Identity) ? primary : p)
+                    .Distinct(ReferenceEqualityComparer<PlayerSessionState>.Instance)
+                    .ToList();
+                SessionPlayers.Remove(duplicate);
+            }
+        }
+    }
+
+    private static void MergeDuplicateIntoPrimary(PlayerSessionState primary, PlayerSessionState duplicate)
+    {
+        if (string.IsNullOrWhiteSpace(primary.Identity.World) && !string.IsNullOrWhiteSpace(duplicate.Identity.World))
+            primary.Identity = duplicate.Identity;
+
+        if ((primary.PartySlot <= 0 || duplicate.PartySlot < primary.PartySlot) && duplicate.PartySlot > 0)
+            primary.PartySlot = duplicate.PartySlot;
+
+        if (duplicate.Bank.TotalTracked > primary.Bank.TotalTracked)
+            primary.Bank = duplicate.Bank;
+        else if (primary.Bank.LastTradeAmount <= 0 && duplicate.Bank.LastTradeAmount > 0)
+            primary.Bank.LastTradeAmount = duplicate.Bank.LastTradeAmount;
+
+        if (!primary.BetConfirmed && duplicate.BetConfirmed)
+            primary.BetConfirmed = true;
+
+        if (primary.Hands.Count == 0 && duplicate.Hands.Count > 0)
+            primary.Hands = duplicate.Hands;
+
+        if (duplicate.RoundHistory.Count > 0)
+            primary.RoundHistory.AddRange(duplicate.RoundHistory);
+
+        if (StatusPriority(duplicate.Status) > StatusPriority(primary.Status))
+            primary.Status = duplicate.Status;
+    }
+
+    private static bool HasActiveRoundState(PlayerSessionState player)
+        => player.BetConfirmed || player.Bank.ActiveBet > 0 || player.Hands.Any(h => !h.IsVoided && h.Cards.Count > 0);
+
+    private static int StatusPriority(PlayerStatus status) => status switch
+    {
+        PlayerStatus.Playing => 5,
+        PlayerStatus.SittingOut => 4,
+        PlayerStatus.LeftDisconnected => 3,
+        PlayerStatus.CashedOut => 2,
+        PlayerStatus.SpectatorStaff => 1,
+        _ => 0
+    };
+
+    private static bool IsSameNormalizedName(PlayerIdentity a, PlayerIdentity b)
+        => !string.IsNullOrWhiteSpace(NormalizeName(a.Name))
+           && string.Equals(NormalizeName(a.Name), NormalizeName(b.Name), StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var characterName = value.Trim();
+        var atIndex = characterName.IndexOf('@', StringComparison.Ordinal);
+        if (atIndex >= 0)
+            characterName = characterName[..atIndex];
+
+        Span<char> buffer = stackalloc char[Math.Min(characterName.Length, 64)];
+        var count = 0;
+        foreach (var ch in characterName)
+        {
+            if (!char.IsLetterOrDigit(ch))
+                continue;
+            if (count >= buffer.Length)
+                break;
+            buffer[count++] = char.ToLowerInvariant(ch);
+        }
+
+        return new string(buffer[..count]);
+    }
+
+    private sealed class ReferenceEqualityComparer<T> : IEqualityComparer<T> where T : class
+    {
+        public static ReferenceEqualityComparer<T> Instance { get; } = new();
+        public bool Equals(T? x, T? y) => ReferenceEquals(x, y);
+        public int GetHashCode(T obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
     }
 
     private void RestoreRoundPlayerStatuses()

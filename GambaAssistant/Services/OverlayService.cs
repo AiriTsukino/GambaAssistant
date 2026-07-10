@@ -16,12 +16,29 @@ public sealed class OverlayService
     private readonly LogService log;
     private readonly HashSet<string> unresolvedLogged = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTime> projectionWarningTimes = new(StringComparer.OrdinalIgnoreCase);
+    private const float CompactPanelWidth = 245f;
+    private const float CompactPanelHeight = 92f;
+    private const float DetailedPanelWidth = 300f;
+    private const float DetailedPanelHeight = 150f;
+    private const float ActiveActionsHeight = 112f;
+    private Action? hitActiveHand;
+    private Action? standActiveHand;
+    private Action? doubleDownActiveHand;
+    private Action? splitActiveHand;
 
     public OverlayService(Configuration config, BlackjackSession session, LogService log)
     {
         this.config = config;
         this.session = session;
         this.log = log;
+    }
+
+    public void SetBlackjackActionCallbacks(Action hit, Action stand, Action doubleDown, Action split)
+    {
+        hitActiveHand = hit;
+        standActiveHand = stand;
+        doubleDownActiveHand = doubleDown;
+        splitActiveHand = split;
     }
 
     public void Draw()
@@ -63,6 +80,22 @@ public sealed class OverlayService
     {
         var title = "GambaAssistant Table Overlay##ga_combined_table_overlay";
 
+        var textScale = Math.Clamp(config.Overlay.TextScale, 0.65f, 2.0f);
+        var panelColumns = Math.Clamp(config.Overlay.PlayerPanelColumns, 1, 8);
+        var panelSize = GetCombinedOverlayPanelSize(textScale);
+        var hasActiveActions = HasActiveTurnActions();
+        var rowCount = players.Count == 0 ? 0 : (int)Math.Ceiling(players.Count / (float)panelColumns);
+        var style = ImGui.GetStyle();
+        var gridWidth = players.Count == 0
+            ? panelSize.X
+            : panelColumns * panelSize.X + Math.Max(0, panelColumns - 1) * style.ItemSpacing.X;
+        var windowWidth = gridWidth + 28f;
+        var windowHeight = 66f
+            + (hasActiveActions ? ActiveActionsHeight * textScale + style.ItemSpacing.Y : 0f)
+            + Math.Max(1, rowCount) * panelSize.Y
+            + Math.Max(0, rowCount - 1) * style.ItemSpacing.Y
+            + 20f;
+
         // OverlayService draws outside the main Dalamud WindowSystem windows, so apply the
         // same local GambaAssistant theme here as a scoped push/pop. This keeps the overlay
         // visually consistent without touching global Dalamud styling.
@@ -76,30 +109,49 @@ public sealed class OverlayService
         ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1f);
 
         ImGui.SetNextWindowPos(new Vector2(35f, 90f), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSizeConstraints(new Vector2(320f, 0f), new Vector2(620f, 9999f));
+        ImGui.SetNextWindowSize(new Vector2(windowWidth, windowHeight), ImGuiCond.Always);
+        ImGui.SetNextWindowSizeConstraints(new Vector2(panelSize.X + 28f, 120f), new Vector2(2600f, 2600f));
 
-        var flags = ImGuiWindowFlags.AlwaysAutoResize
-            | ImGuiWindowFlags.NoCollapse
+        var flags = ImGuiWindowFlags.NoCollapse
             | ImGuiWindowFlags.NoScrollbar
+            | ImGuiWindowFlags.NoScrollWithMouse
             | ImGuiWindowFlags.NoDocking;
 
         if (ImGui.Begin(title, flags))
         {
-            ImGui.SetWindowFontScale(Math.Clamp(config.Overlay.TextScale, 0.65f, 2.0f));
+            ImGui.SetWindowFontScale(textScale);
 
             ImGui.TextColored(GambaTheme.Gold, "Table Overlay");
             ImGui.SameLine();
             ImGui.TextDisabled(config.Overlay.Compact ? "Compact" : "Detailed");
+            ImGui.SameLine();
+            ImGui.TextDisabled($"{panelColumns} wide");
             ImGui.Separator();
+
+            DrawActiveTurnActionPanel(textScale);
 
             if (players.Count == 0)
             {
+                ImGui.BeginChild("##ga_overlay_empty_panel", panelSize, true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
                 ImGui.TextDisabled("No table members.");
+                ImGui.EndChild();
             }
-            else
+            else if (panelColumns <= 1)
             {
                 for (var i = 0; i < players.Count; i++)
-                    DrawThemedOverlayCard(players[i], i);
+                    DrawThemedOverlayCard(players[i], i, panelSize);
+            }
+            else if (ImGui.BeginTable("##ga_overlay_player_grid", panelColumns, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.NoHostExtendX))
+            {
+                for (var col = 0; col < panelColumns; col++)
+                    ImGui.TableSetupColumn($"##ga_overlay_col_{col}", ImGuiTableColumnFlags.WidthFixed, panelSize.X);
+
+                for (var i = 0; i < players.Count; i++)
+                {
+                    ImGui.TableNextColumn();
+                    DrawThemedOverlayCard(players[i], i, panelSize, suppressTopSpacing: true);
+                }
+                ImGui.EndTable();
             }
 
             ImGui.SetWindowFontScale(1.0f);
@@ -111,11 +163,166 @@ public sealed class OverlayService
         GambaTheme.Pop();
     }
 
+    private Vector2 GetCombinedOverlayPanelSize(float textScale)
+    {
+        var width = config.Overlay.Compact ? CompactPanelWidth : DetailedPanelWidth;
+        var height = config.Overlay.Compact ? CompactPanelHeight : DetailedPanelHeight;
+        return new Vector2(width * textScale, height * textScale);
+    }
+
+    private bool HasActiveTurnActions()
+        => session.Round.Phase == BlackjackPhase.PlayerTurns
+           && session.ActivePlayer is { } player
+           && session.ActiveHand is not null
+           && player.Status != PlayerStatus.Dealer;
+
+    private void DrawActiveTurnActionPanel(float textScale)
+    {
+        if (session.Round.Phase != BlackjackPhase.PlayerTurns
+            || session.ActivePlayer is not { } player
+            || session.ActiveHand is not { } hand
+            || player.Status == PlayerStatus.Dealer)
+            return;
+
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, GambaTheme.PanelBg);
+        ImGui.PushStyleColor(ImGuiCol.Border, GambaTheme.Border);
+        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 7f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(9f, 7f));
+
+        var height = ActiveActionsHeight * textScale;
+        ImGui.BeginChild("##ga_overlay_active_actions", new Vector2(0f, height), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+
+        ImGui.TextColored(GambaTheme.Gold, $"Active: {player.DisplayName} {GetHandLabel(player, hand)}");
+        ImGui.TextUnformatted($"{BlankIfEmpty(hand.CardText)} = {hand.TotalText} | Bet {hand.Bet:N0}");
+
+        var sm = new BlackjackStateMachine(session);
+        var actionCallbacksReady = hitActiveHand is not null && standActiveHand is not null && doubleDownActiveHand is not null && splitActiveHand is not null;
+        var basicEnabled = actionCallbacksReady && IsActiveUnfinishedHand(player, hand);
+        var basicReason = actionCallbacksReady ? "Only the active unfinished hand can use this action." : "Blackjack table actions are not ready yet.";
+
+        if (OverlayActionButton("Hit", basicEnabled, basicReason, "Roll one additional card for the active hand."))
+            hitActiveHand?.Invoke();
+
+        DrawSameLineIfFits("Stand");
+        if (OverlayActionButton("Stand", basicEnabled, basicReason, "Complete the active hand without drawing another card."))
+            standActiveHand?.Invoke();
+
+        var doubleReason = actionCallbacksReady ? string.Empty : "Blackjack table actions are not ready yet.";
+        var doubleEnabled = actionCallbacksReady && sm.CanDouble(hand, out doubleReason);
+        var doubleShortfall = GetDoubleDownAdditionalGilNeeded(player, hand);
+        if (!doubleEnabled && doubleShortfall > 0 && IsDoubleDownStructurallyLegal(hand, out _))
+            doubleReason = $"Player needs an additional {doubleShortfall:N0} gil to double down.";
+        var doubleLabel = doubleShortfall > 0 && IsDoubleDownStructurallyLegal(hand, out _)
+            ? $"Double Down (+{doubleShortfall:N0})"
+            : "Double Down";
+
+        DrawSameLineIfFits(doubleLabel);
+        if (OverlayActionButton(doubleLabel, doubleEnabled, doubleReason, doubleShortfall > 0
+                ? $"Player must trade an additional {doubleShortfall:N0} gil before Double Down can be used."
+                : "Double the hand wager, roll exactly one more card, then stand."))
+            doubleDownActiveHand?.Invoke();
+
+        var splitReason = actionCallbacksReady ? string.Empty : "Blackjack table actions are not ready yet.";
+        var splitEnabled = actionCallbacksReady && sm.CanSplit(hand, out splitReason);
+        DrawSameLineIfFits("Split");
+        if (OverlayActionButton("Split", splitEnabled, splitReason, "Split a matching pair into two separate hands with an additional matching wager."))
+            splitActiveHand?.Invoke();
+
+        ImGui.EndChild();
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor(2);
+        ImGui.Spacing();
+    }
+
+    private bool IsActiveUnfinishedHand(PlayerSessionState player, BlackjackHand hand)
+        => session.Round.Phase == BlackjackPhase.PlayerTurns
+           && session.ActivePlayer == player
+           && session.ActiveHand == hand
+           && !hand.IsComplete
+           && !hand.IsBusted
+           && !hand.IsVoided;
+
+    private bool IsDoubleDownStructurallyLegal(BlackjackHand hand, out string reason)
+    {
+        reason = string.Empty;
+        if (session.Round.Phase != BlackjackPhase.PlayerTurns || session.ActiveHand != hand || hand.IsComplete)
+        {
+            reason = "Double Down is only available for the active unfinished hand.";
+            return false;
+        }
+
+        if (hand.Cards.Count != 2)
+        {
+            reason = "Double Down is only available on the first two cards by default.";
+            return false;
+        }
+
+        if (hand.IsSplitHand && !session.Rules.DoubleAfterSplit)
+        {
+            reason = "Rules disable Double Down on split hands.";
+            return false;
+        }
+
+        if (session.Rules.DoubleOnlyOnNineTenEleven && hand.BestTotal is not (9 or 10 or 11))
+        {
+            reason = "Rules restrict Double Down to totals of 9, 10, or 11.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static long GetDoubleDownAdditionalGilNeeded(PlayerSessionState player, BlackjackHand hand)
+        => Math.Max(0, hand.Bet - player.Bank.Available);
+
+    private static bool OverlayActionButton(string label, bool enabled, string disabledReason, string enabledTooltip)
+    {
+        if (!enabled)
+            ImGui.BeginDisabled();
+
+        var clicked = ImGui.Button(label);
+
+        if (!enabled)
+        {
+            ImGui.EndDisabled();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(disabledReason);
+            return false;
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(enabledTooltip);
+        return clicked;
+    }
+
+    private static void DrawSameLineIfFits(string nextLabel)
+    {
+        var visibleLabel = VisibleLabel(nextLabel);
+        var style = ImGui.GetStyle();
+        var nextWidth = ImGui.CalcTextSize(visibleLabel).X + style.FramePadding.X * 2f;
+        var rightEdgeIfSameLine = ImGui.GetItemRectMax().X + style.ItemSpacing.X + nextWidth;
+        var contentRight = ImGui.GetWindowPos().X + ImGui.GetWindowContentRegionMax().X;
+        if (rightEdgeIfSameLine <= contentRight)
+            ImGui.SameLine();
+    }
+
+    private static string VisibleLabel(string label)
+    {
+        var marker = label.IndexOf("##", StringComparison.Ordinal);
+        return marker >= 0 ? label[..marker] : label;
+    }
+
+    private static string GetHandLabel(PlayerSessionState player, BlackjackHand hand)
+    {
+        var activeHandCount = player.Hands.Count(h => !h.IsVoided && h.Cards.Count > 0);
+        return hand.IsSplitHand || activeHandCount > 1 ? $"Hand {hand.HandNumber}" : "Hand";
+    }
+
     private static Vector4 WithAlpha(Vector4 color, float alpha) => new(color.X, color.Y, color.Z, alpha);
 
-    private void DrawThemedOverlayCard(PlayerSessionState player, int index)
+    private void DrawThemedOverlayCard(PlayerSessionState player, int index, Vector2 panelSize, bool suppressTopSpacing = false)
     {
-        if (index > 0)
+        if (index > 0 && !suppressTopSpacing)
             ImGui.Spacing();
 
         var lines = BuildOverlayLines(player);
@@ -127,16 +334,24 @@ public sealed class OverlayService
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 7f);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(9f, 7f));
 
-        var childHeight = Math.Max(54f, (lines.Count * ImGui.GetTextLineHeightWithSpacing()) + 18f);
-        ImGui.BeginChild($"##ga_overlay_card_{index}_{SafeId(player.Identity.ToString())}", new Vector2(0f, childHeight), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        ImGui.BeginChild($"##ga_overlay_card_{index}_{SafeId(player.Identity.ToString())}", panelSize, true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
-        ImGui.TextColored(player.Status == PlayerStatus.Dealer ? GambaTheme.Gold : GambaTheme.Text, lines[0]);
+        DrawOverlayCardLine(lines[0], player.Status == PlayerStatus.Dealer ? GambaTheme.Gold : GambaTheme.Text);
         for (var i = 1; i < lines.Count; i++)
-            ImGui.TextColored(i == 1 ? GambaTheme.Text : GambaTheme.MutedText, lines[i]);
+            DrawOverlayCardLine(lines[i], i == 1 ? GambaTheme.Text : GambaTheme.MutedText);
 
         ImGui.EndChild();
         ImGui.PopStyleVar(2);
         ImGui.PopStyleColor(2);
+    }
+
+    private static void DrawOverlayCardLine(string text, Vector4 color)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Text, color);
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
+        ImGui.TextWrapped(text);
+        ImGui.PopTextWrapPos();
+        ImGui.PopStyleColor();
     }
 
     private void DrawScreenFallbackOverlay(PlayerSessionState player, int index)
