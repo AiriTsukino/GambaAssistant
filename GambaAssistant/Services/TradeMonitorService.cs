@@ -76,41 +76,59 @@ public sealed unsafe class TradeMonitorService
 
     public bool TryAddDetectedIncomingTrade(string playerName, long amount, string note = "Detected confirmed incoming gil trade")
     {
-        if (!IsGilAmountConfirmedByTradeWindow(amount, out var reason))
+        if (!TryResolveCurrentPartyMember(playerName, out var partyMember))
         {
-            log.Add(LogCategory.Warnings, $"Ignored incoming gil line for {playerName}: {amount:N0} gil was not confirmed by the Trade window. {reason}");
+            log.Add(LogCategory.Warnings, $"Ignored incoming gil trade from {playerName}: player is not currently in the party.");
             return false;
         }
 
-        AddDetectedIncomingTrade(playerName, amount, note);
+        if (!IsGilAmountConfirmedByTradeWindow(amount, out var reason))
+        {
+            log.Add(LogCategory.Warnings, $"Ignored incoming gil line for {partyMember.Display}: {amount:N0} gil was not confirmed by the Trade window. {reason}");
+            return false;
+        }
+
+        AddDetectedIncomingTrade(partyMember.Display, amount, note);
         return true;
     }
 
     public bool TryAddDetectedOutgoingTrade(string playerName, long amount, string note = "Detected confirmed outgoing gil trade")
     {
-        if (!IsGilAmountConfirmedByTradeWindow(amount, out var reason))
+        if (!TryResolveCurrentPartyMember(playerName, out var partyMember))
         {
-            log.Add(LogCategory.Warnings, $"Ignored outgoing gil line for {playerName}: {amount:N0} gil was not confirmed by the Trade window. {reason}");
+            log.Add(LogCategory.Warnings, $"Ignored outgoing gil trade to {playerName}: player is not currently in the party.");
             return false;
         }
 
-        AddDetectedOutgoingTrade(playerName, amount, note);
+        if (!IsGilAmountConfirmedByTradeWindow(amount, out var reason))
+        {
+            log.Add(LogCategory.Warnings, $"Ignored outgoing gil line for {partyMember.Display}: {amount:N0} gil was not confirmed by the Trade window. {reason}");
+            return false;
+        }
+
+        AddDetectedOutgoingTrade(partyMember.Display, amount, note);
         return true;
     }
 
     public bool TryAddSystemConfirmedOutgoingTrade(string playerName, long amount, string note = "Detected confirmed outgoing gil trade from system log")
     {
-        if (amount <= 0)
+        if (!TryResolveCurrentPartyMember(playerName, out var partyMember))
         {
-            log.Add(LogCategory.Warnings, $"Ignored outgoing gil line for {playerName}: amount was not positive.");
+            log.Add(LogCategory.Warnings, $"Ignored outgoing gil trade to {playerName}: player is not currently in the party.");
             return false;
         }
 
-        AddDetectedOutgoingTrade(playerName, amount, note);
+        if (amount <= 0)
+        {
+            log.Add(LogCategory.Warnings, $"Ignored outgoing gil line for {partyMember.Display}: amount was not positive.");
+            return false;
+        }
+
+        AddDetectedOutgoingTrade(partyMember.Display, amount, note);
         return true;
     }
 
-    public TradeEntry AddDetectedIncomingTrade(string playerName, long amount, string note = "Detected from chat/log text")
+    private TradeEntry AddDetectedIncomingTrade(string playerName, long amount, string note = "Detected from chat/log text")
     {
         var player = FindPlayerByName(playerName) ?? RehydrateTradePlayer(playerName);
         var dealer = session.SessionPlayers.FirstOrDefault(p => p.Status == PlayerStatus.Dealer) ?? session.SessionPlayers.FirstOrDefault();
@@ -125,7 +143,7 @@ public sealed unsafe class TradeMonitorService
     }
 
 
-    public TradeEntry AddDetectedOutgoingTrade(string playerName, long amount, string note = "Detected outgoing cash-out from chat/log text")
+    private TradeEntry AddDetectedOutgoingTrade(string playerName, long amount, string note = "Detected outgoing cash-out from chat/log text")
     {
         var player = FindPlayerByName(playerName);
         var dealer = session.SessionPlayers.FirstOrDefault(p => p.Status == PlayerStatus.Dealer) ?? session.SessionPlayers.FirstOrDefault();
@@ -140,6 +158,34 @@ public sealed unsafe class TradeMonitorService
         // players cash out mid-round or between hands without phase-specific
         // bookkeeping blocking the bank update.
         return AddTrade(dealer.Identity, player.Identity, amount, TradeClassification.CashOut, note, manual: false);
+    }
+
+    private static bool TryResolveCurrentPartyMember(string playerName, out PlayerIdentity identity)
+    {
+        identity = default;
+        var normalizedName = NormalizeName(playerName);
+        if (string.IsNullOrWhiteSpace(normalizedName) || !DalamudServices.PlayerState.IsLoaded)
+            return false;
+
+        try
+        {
+            foreach (var member in DalamudServices.PartyList)
+            {
+                var memberName = member.Name.TextValue.Trim();
+                if (!string.Equals(NormalizeName(memberName), normalizedName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var world = member.World.ValueNullable?.Name.ExtractText() ?? string.Empty;
+                identity = new PlayerIdentity(memberName, world);
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
     }
 
     private bool IsGilAmountConfirmedByTradeWindow(long amount, out string reason)
