@@ -54,16 +54,43 @@ public sealed class BlackjackStateMachine : IGameStateMachine
 
     public bool CanSplit(BlackjackHand? hand, out string reason)
     {
+        if (!CanSplitStructurally(hand, out reason))
+            return false;
+
+        var player = session.ActivePlayer;
+        if (player == null)
+        {
+            reason = "No active player is available for this split.";
+            return false;
+        }
+
+        if (player.Bank.Available < hand!.Bet)
+        {
+            reason = "Player needs enough available bank for the extra split bet.";
+            return false;
+        }
+
+        return true;
+    }
+
+    public bool CanSplitStructurally(BlackjackHand? hand, out string reason)
+    {
         reason = string.Empty;
         if (!session.Rules.SplittingEnabled) { reason = "Splitting is disabled by this profile."; return false; }
         if (session.Round.Phase != BlackjackPhase.PlayerTurns || hand == null || hand.IsComplete) { reason = "Split is only available for the active unfinished hand."; return false; }
         if (hand.Cards.Count != 2) { reason = "Split requires exactly two cards."; return false; }
         if (hand.IsSplitHand && !session.Rules.ResplitPairs) { reason = "Rules allow a hand to be split only once."; return false; }
-        var match = session.Rules.SplitByExactRank ? hand.CanSplitByExactRank : hand.CanSplitByValue;
-        if (!match) { reason = session.Rules.SplitByExactRank ? "Cards must match by exact rank." : "Cards must match by value."; return false; }
+
+        // Every exact pair is always splittable: A+A, 1+1, 5+5, K+K, etc.
+        // The existing value-pair rule can additionally allow different ten-value
+        // ranks, such as K+Q, when that profile option is enabled.
+        var cardsMatch = hand.CanSplitByExactRank
+                         || (session.Rules.SplitByValue && hand.CanSplitByValue);
+        if (!cardsMatch) { reason = "Cards must be a matching pair."; return false; }
+
         var player = session.ActivePlayer;
-        if (player == null || player.Hands.Count(h => !h.IsVoided && h.Cards.Count > 0) >= session.Rules.MaxSplitHands) { reason = "Maximum split hands reached."; return false; }
-        if (player.Bank.Available < hand.Bet) { reason = "Player needs enough available bank for the extra split bet."; return false; }
+        if (player == null) { reason = "No active player is available for this split."; return false; }
+        if (player.Hands.Count(h => !h.IsVoided && h.Cards.Count > 0) >= session.Rules.MaxSplitHands) { reason = "Maximum split hands reached."; return false; }
         return true;
     }
 

@@ -224,8 +224,17 @@ public sealed class OverlayService
 
         var splitReason = actionCallbacksReady ? string.Empty : "Blackjack table actions are not ready yet.";
         var splitEnabled = actionCallbacksReady && sm.CanSplit(hand, out splitReason);
-        DrawSameLineIfFits("Split");
-        if (OverlayActionButton("Split", splitEnabled, splitReason, "Split a matching pair into two separate hands with an additional matching wager."))
+        var splitShortfall = GetSplitAdditionalGilNeeded(player, hand);
+        if (!splitEnabled && actionCallbacksReady && splitShortfall > 0 && sm.CanSplitStructurally(hand, out _))
+            splitReason = $"Player needs an additional {splitShortfall:N0} gil to split this pair.";
+        var splitLabel = actionCallbacksReady && splitShortfall > 0 && sm.CanSplitStructurally(hand, out _)
+            ? $"Split (+{splitShortfall:N0})"
+            : "Split";
+
+        DrawSameLineIfFits(splitLabel);
+        if (OverlayActionButton(splitLabel, splitEnabled, splitReason, splitShortfall > 0
+                ? $"Player must trade an additional {splitShortfall:N0} gil before this matching pair can be split."
+                : "Split a matching pair into two separate hands with an additional matching wager."))
             splitActiveHand?.Invoke();
 
         ImGui.EndChild();
@@ -273,6 +282,9 @@ public sealed class OverlayService
     }
 
     private static long GetDoubleDownAdditionalGilNeeded(PlayerSessionState player, BlackjackHand hand)
+        => Math.Max(0, hand.Bet - player.Bank.Available);
+
+    private static long GetSplitAdditionalGilNeeded(PlayerSessionState player, BlackjackHand hand)
         => Math.Max(0, hand.Bet - player.Bank.Available);
 
     private static bool OverlayActionButton(string label, bool enabled, string disabledReason, string enabledTooltip)

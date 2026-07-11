@@ -382,6 +382,12 @@ public sealed class TableTab
             ? $"Double Down (+{doubleShortfall:N0})"
             : "Double Down";
         var splitEnabled = sm.CanSplit(hand, out var splitReason);
+        var splitShortfall = GetSplitAdditionalGilNeeded(p, hand);
+        if (!splitEnabled && splitShortfall > 0 && sm.CanSplitStructurally(hand, out _))
+            splitReason = $"Player needs an additional {splitShortfall:N0} gil to split this pair.";
+        var splitLabel = splitShortfall > 0 && sm.CanSplitStructurally(hand, out _)
+            ? $"Split (+{splitShortfall:N0})"
+            : "Split";
 
         ImGui.Indent(12f);
         DrawControlGroupHeader("Active hand actions");
@@ -399,8 +405,10 @@ public sealed class TableTab
                 : "Double the hand wager, roll exactly one more card, then stand."))
             DoubleDown(p, hand);
 
-        DrawSameLineIfFits("Split");
-        if (DisabledButtonWithTooltip("Split", splitEnabled, splitReason, "Split a matching pair into two separate hands with an additional matching wager."))
+        DrawSameLineIfFits(splitLabel);
+        if (DisabledButtonWithTooltip(splitLabel, splitEnabled, splitReason, splitShortfall > 0
+                ? $"Player must trade an additional {splitShortfall:N0} gil before the dealer can split this matching pair."
+                : "Split a matching pair into two separate hands with an additional matching wager."))
             Split(p, hand);
 
         ImGui.Unindent(12f);
@@ -1021,7 +1029,16 @@ public sealed class TableTab
         }
 
         if (sm.CanSplit(hand, out _))
+        {
             options.Add("Split");
+        }
+        else if (session.ActivePlayer is { } splitPlayer
+                 && sm.CanSplitStructurally(hand, out _)
+                 && GetSplitAdditionalGilNeeded(splitPlayer, hand) is var splitNeeded
+                 && splitNeeded > 0)
+        {
+            options.Add($"Split with additional {splitNeeded:N0} gil");
+        }
 
         return options.Count == 0 ? "No legal actions" : string.Join(", ", options);
     }
@@ -1057,6 +1074,11 @@ public sealed class TableTab
     }
 
     private static long GetDoubleDownAdditionalGilNeeded(PlayerSessionState player, BlackjackHand hand)
+    {
+        return Math.Max(0, hand.Bet - player.Bank.Available);
+    }
+
+    private static long GetSplitAdditionalGilNeeded(PlayerSessionState player, BlackjackHand hand)
     {
         return Math.Max(0, hand.Bet - player.Bank.Available);
     }
