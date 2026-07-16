@@ -42,8 +42,43 @@ public sealed class PlayerSessionService
             }
         }
 
+        if (session.Round.Phase == BlackjackPhase.BettingOpen
+            && partyList.All(p => p.Status == PlayerStatus.Dealer))
+            CloseBetting("Betting closed automatically because no players remain in the live party");
+
         NormalizeTrackedPlayers();
         session.SessionPlayers.Sort((a,b) => a.PartySlot.CompareTo(b.PartySlot));
+    }
+
+    public bool CloseBetting(string reason)
+    {
+        if (session.Round.Phase != BlackjackPhase.BettingOpen)
+            return false;
+
+        long returnedBets = 0;
+        var affectedPlayers = 0;
+        foreach (var player in session.SessionPlayers.Where(p => p.Status != PlayerStatus.Dealer))
+        {
+            if (player.Bank.ActiveBet > 0)
+            {
+                returnedBets += player.Bank.ActiveBet;
+                player.Bank.Available += player.Bank.ActiveBet;
+                player.Bank.ActiveBet = 0;
+                affectedPlayers++;
+            }
+
+            player.BetConfirmed = false;
+            player.Hands.Clear();
+            if (player.Status == PlayerStatus.Playing)
+                player.Status = player.Bank.TotalTracked > 0 ? PlayerStatus.SittingOut : PlayerStatus.CashedOut;
+        }
+
+        session.Round.Players.Clear();
+        session.Round.ActivePlayerIndex = 0;
+        session.Round.ActiveHandIndex = 0;
+        session.Round.Phase = BlackjackPhase.CashOutBetweenHands;
+        log.Add(LogCategory.RoundFlow, $"{reason}. Returned {returnedBets:N0} gil in pending bets for {affectedPlayers} player(s).");
+        return true;
     }
 
     public void RemovePlayer(PlayerSessionState player, string reason = "Removed from table")

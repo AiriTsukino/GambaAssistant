@@ -127,6 +127,10 @@ public sealed class TableTab
             if (DisabledButtonWithTooltip("Start Dealing", session.Round.Phase == BlackjackPhase.BettingOpen && session.SessionPlayers.Any(p => p.BetConfirmed), "Confirm at least one valid bet first.", "Close betting and start rolling the initial Blackjack deal."))
                 StartDealing();
 
+            DrawSameLineIfFits("Close Betting");
+            if (DisabledButtonWithTooltip("Close Betting", session.Round.Phase == BlackjackPhase.BettingOpen, "Betting is not currently open.", "Close betting without dealing. Any pending bets are returned to player banks."))
+                CloseBetting();
+
             DrawSameLineIfFits("Settle Round");
             if (DisabledButtonWithTooltip("Settle Round", session.Round.Phase == BlackjackPhase.Settlement, "Settlement is available once player/dealer resolution is complete.", "Settle every active hand against the dealer and move to the between-hands cashout phase."))
                 SettleRound();
@@ -627,6 +631,21 @@ public sealed class TableTab
         undo.Push("Start dealing", () => RestoreSnapshot(before));
     }
 
+    private void CloseBetting()
+    {
+        var before = CaptureSnapshot();
+        if (!players.CloseBetting("Betting closed manually by the dealer"))
+            return;
+
+        pendingInitialDealCards = 0;
+        dealerTurnStarted = false;
+        allBustRoundOverAnnounced = false;
+        lastAstrologianBeneficTurnKey = null;
+        nextAstrologianBattleModeRefreshTime = 0;
+        chat.EnqueueParty("Betting is closed. Pending bets have been returned; no round will be dealt.");
+        undo.Push("Close betting", () => RestoreSnapshot(before));
+    }
+
     private static void NormalizePrimaryHandForNewDeal(PlayerSessionState player)
     {
         var bet = player.Bank.ActiveBet;
@@ -887,11 +906,15 @@ public sealed class TableTab
     private void RequestSplitCompletionCards(PlayerSessionState player, BlackjackHand firstHand, BlackjackHand secondHand)
     {
         var remaining = 2;
+        var splitAces = firstHand.Cards.Count == 1
+                        && secondHand.Cards.Count == 1
+                        && firstHand.Cards[0].IsAce
+                        && secondHand.Cards[0].IsAce;
 
         void ApplySplitCard(BlackjackHand targetHand, BlackjackCard card)
         {
             targetHand.AddCard(card);
-            if (session.Rules.SplitAcesOneCardOnly && targetHand.IsSplitHand && targetHand.Cards.Any(c => c.IsAce))
+            if (session.Rules.SplitAcesOneCardOnly && splitAces)
                 targetHand.IsComplete = true;
             targetHand.Actions.Add($"Split hand {targetHand.HandNumber} card");
             chat.EnqueueParty($"{player.DisplayName} receives {card} for Hand {targetHand.HandNumber}. Hand: {targetHand.CardText} = {targetHand.TotalText}.");

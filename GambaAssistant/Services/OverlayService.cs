@@ -100,7 +100,7 @@ public sealed class OverlayService
         // same local GambaAssistant theme here as a scoped push/pop. This keeps the overlay
         // visually consistent without touching global Dalamud styling.
         GambaTheme.Push();
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, WithAlpha(GambaTheme.DarkBg, Math.Clamp(config.Overlay.BackgroundOpacity, 0.05f, 1.0f)));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, WithAlpha(GambaTheme.DarkBg, GetBackgroundOpacity()));
         ImGui.PushStyleColor(ImGuiCol.Border, GambaTheme.Border);
         ImGui.PushStyleColor(ImGuiCol.TitleBgActive, GambaTheme.PurpleActive);
         ImGui.PushStyleColor(ImGuiCol.TitleBg, new Vector4(0.16f, 0.08f, 0.25f, 1f));
@@ -332,6 +332,11 @@ public sealed class OverlayService
 
     private static Vector4 WithAlpha(Vector4 color, float alpha) => new(color.X, color.Y, color.Z, alpha);
 
+    private float GetBackgroundOpacity()
+        => config.Overlay.OpaqueBackground
+            ? 1.0f
+            : Math.Clamp(config.Overlay.BackgroundOpacity, 0.05f, 1.0f);
+
     private void DrawThemedOverlayCard(PlayerSessionState player, int index, Vector2 panelSize, bool suppressTopSpacing = false)
     {
         if (index > 0 && !suppressTopSpacing)
@@ -381,7 +386,7 @@ public sealed class OverlayService
     private void DrawMovableOverlayWindow(string title, Vector2 defaultPos, PlayerSessionState player)
     {
         ImGui.SetNextWindowPos(defaultPos, ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowBgAlpha(Math.Clamp(config.Overlay.BackgroundOpacity, 0.05f, 1.0f));
+        ImGui.SetNextWindowBgAlpha(GetBackgroundOpacity());
         ImGui.SetNextWindowSizeConstraints(new Vector2(220f, 0f), new Vector2(500f, 9999f));
 
         var flags = ImGuiWindowFlags.AlwaysAutoResize
@@ -416,7 +421,7 @@ public sealed class OverlayService
         var size = new Vector2(maxWidth + padding * 2f, lines.Count * lineHeight + MathF.Max(0, lines.Count - 1) * spacing + padding * 2f);
         var pos = new Vector2(anchor.X - size.X / 2f, anchor.Y - size.Y);
         var rounding = 5f * textScale;
-        var opacity = Math.Clamp(config.Overlay.BackgroundOpacity, 0.05f, 1.0f);
+        var opacity = GetBackgroundOpacity();
         var bg = ToColor(18, 12, 24, (int)(opacity * 255f));
         var border = ToColor(190, 145, 255, 180);
         var text = ToColor(245, 235, 255, 255);

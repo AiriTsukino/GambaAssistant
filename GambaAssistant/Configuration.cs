@@ -41,6 +41,7 @@ public sealed class OverlaySettings
     public Dictionary<string, float> PlayerHeightOffsets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public float MaxRenderDistance { get; set; } = 30f;
     public float BackgroundOpacity { get; set; } = 0.55f;
+    public bool OpaqueBackground { get; set; }
     public bool ShowOnlyTableMembers { get; set; } = true;
     public bool UseDrawnOverhead { get; set; } = false;
 }

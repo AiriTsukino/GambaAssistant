@@ -58,9 +58,17 @@ public sealed class OverlaySettingsTab
             if (ImGui.InputFloat("Max render distance", ref max))
                 config.Overlay.MaxRenderDistance = Math.Max(0f, max);
 
+            var opaque = config.Overlay.OpaqueBackground;
+            if (ImGui.Checkbox("Opaque background", ref opaque))
+                config.Overlay.OpaqueBackground = opaque;
+            UiHelpers.Help("Makes the overlay background fully solid for maximum readability over bright or busy game elements. Turn this off to use the opacity slider below.");
+
             var opacity = config.Overlay.BackgroundOpacity;
             if (ImGui.SliderFloat("Background opacity", ref opacity, 0f, 1f))
                 config.Overlay.BackgroundOpacity = opacity;
+            UiHelpers.Help(config.Overlay.OpaqueBackground
+                ? "The saved transparency level is preserved, but the opaque background option currently overrides it."
+                : "Controls overlay background transparency. Higher values make the overlay easier to read over the game.");
         });
 
         UiHelpers.Card("Per-player height adjustments", () =>

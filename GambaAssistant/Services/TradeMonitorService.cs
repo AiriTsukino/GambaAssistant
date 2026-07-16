@@ -344,11 +344,28 @@ public sealed unsafe class TradeMonitorService
             case TradeClassification.CashOut:
                 if (TryGetPlayer(entry.To, out var cashedOutPlayer))
                 {
+                    // A wager reserved during BettingOpen has not entered a live hand
+                    // yet. Cancel it before applying an outgoing cash-out so the trade
+                    // reduces the player's complete tracked bank instead of leaving the
+                    // reserved portion stranded as an active bet.
+                    if (session.Round.Phase == BlackjackPhase.BettingOpen && cashedOutPlayer.Bank.ActiveBet > 0)
+                    {
+                        var canceledBet = cashedOutPlayer.Bank.ActiveBet;
+                        cashedOutPlayer.Bank.Available += canceledBet;
+                        cashedOutPlayer.Bank.ActiveBet = 0;
+                        cashedOutPlayer.BetConfirmed = false;
+                        cashedOutPlayer.Hands.Clear();
+                        log.Add(LogCategory.RoundFlow, $"Canceled {canceledBet:N0} gil pending bet for {cashedOutPlayer.DisplayName} before cash-out.");
+                    }
+
+                    var trackedBefore = cashedOutPlayer.Bank.TotalTracked;
                     cashedOutPlayer.Bank.Available = Math.Max(0, cashedOutPlayer.Bank.Available - entry.Amount);
                     cashedOutPlayer.Bank.LastTradeAmount = entry.Amount;
                     if (cashedOutPlayer.Bank.TotalTracked == 0)
                         cashedOutPlayer.Status = PlayerStatus.CashedOut;
-                    log.Add(LogCategory.Trades, $"Cash-out applied: {cashedOutPlayer.DisplayName} -{entry.Amount:N0} gil.");
+                    log.Add(LogCategory.Trades, $"Cash-out applied: {cashedOutPlayer.DisplayName} -{Math.Min(entry.Amount, trackedBefore):N0} tracked gil; bank is now {cashedOutPlayer.Bank.TotalTracked:N0} gil.");
+                    if (entry.Amount > trackedBefore)
+                        log.Add(LogCategory.Warnings, $"Cash-out for {cashedOutPlayer.DisplayName} exceeded the tracked bank by {entry.Amount - trackedBefore:N0} gil; the player bank was clamped to 0.");
                 }
                 break;
         }
