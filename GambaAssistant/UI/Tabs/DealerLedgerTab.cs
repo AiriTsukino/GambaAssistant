@@ -34,7 +34,7 @@ public sealed class DealerLedgerTab
 
             ImGui.Separator();
             ImGui.Text($"Expected dealer gil: {service.ExpectedDealerGil:N0} gil");
-            ImGui.TextDisabled($"Outstanding player banks: {service.OutstandingPlayerBanks:N0} gil");
+            ImGui.TextDisabled("Expected = starting gil + settled game profit/loss + tips + adjustments.");
             if (service.Difference.HasValue)
             {
                 var diff = service.Difference.Value;
@@ -80,16 +80,21 @@ public sealed class DealerLedgerTab
 
         UiHelpers.Card("Session Totals", () =>
         {
-            ImGui.Text($"Live game P/L from banks: {service.LiveGameProfitLoss:N0} gil");
-            ImGui.Text($"Settled hand P/L: {ledger.GameProfitLoss:N0} gil");
+            ImGui.Text($"Settled game profit/loss: {ledger.GameProfitLoss:N0} gil");
             ImGui.Text($"Dealer tips: {ledger.DealerTips:N0} gil");
             ImGui.Text($"Venue tips: {ledger.VenueTips:N0} gil");
             ImGui.Text($"Misc adjustments: {ledger.MiscAdjustments:N0} gil");
             ImGui.Separator();
+            ImGui.Text($"Outstanding player banks: {service.OutstandingPlayerBanks:N0} gil");
             ImGui.Text($"Buy-ins / deposits: {ledger.TotalBuyInsDeposits:N0} gil");
-            ImGui.Text($"Total bets: {ledger.TotalBets:N0} gil");
-            ImGui.Text($"Total payouts: {ledger.TotalPayouts:N0} gil");
             ImGui.Text($"Total cash-outs: {ledger.TotalCashOuts:N0} gil");
+            ImGui.Text($"Bank/trade reconciliation P/L: {service.LiveGameProfitLoss:N0} gil");
+            ImGui.TextColored(service.BankTrackingDifference == 0 ? GambaTheme.Green : GambaTheme.Gold,
+                $"Bank tracking variance: {service.BankTrackingDifference:N0} gil");
+            UiHelpers.Help("A non-zero bank tracking variance means recorded buy-ins, cash-outs, and outstanding player banks do not reconcile with settled hand results. It does not change expected dealer gil.");
+            ImGui.Separator();
+            ImGui.Text($"Total losing wagers: {ledger.TotalBets:N0} gil");
+            ImGui.Text($"Total winning returns: {ledger.TotalPayouts:N0} gil");
         });
     }
 }

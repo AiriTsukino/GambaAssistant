@@ -37,6 +37,14 @@ public sealed class GeneralSettingsTab
                 config.General.UndoLimit = Math.Clamp(undo, 1, 50);
         });
 
+        UiHelpers.Card("Trade Detection", () =>
+        {
+            var automaticTradeDetection = config.General.AutomaticTradeDetectionEnabled;
+            if (ImGui.Checkbox("Automatically track Blackjack gil trades", ref automaticTradeDetection))
+                config.General.AutomaticTradeDetectionEnabled = automaticTradeDetection;
+            UiHelpers.Tooltip("Uses trusted FFXIV system trade messages to add buy-ins and subtract cash-outs for current party members. Normal player chat cannot change banks.");
+        });
+
         UiHelpers.Card("Astrologian Immersion", () =>
         {
             ImGui.TextWrapped("Optional visual flavor only. Blackjack dice/card flow does not wait for these actions to complete.");

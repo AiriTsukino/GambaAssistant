@@ -26,6 +26,7 @@ public sealed class GeneralSettings
     public bool AstrologianImmersionEnabled { get; set; } = false;
     public bool AstrologianAstralDrawOnDealEnabled { get; set; } = false;
     public bool AstrologianKeepBattleModeOnEnabled { get; set; } = false;
+    public bool AutomaticTradeDetectionEnabled { get; set; } = true;
     public bool BlackjackSessionAutosaveEnabled { get; set; } = true;
     public bool DeathRollSessionAutosaveEnabled { get; set; } = true;
 }

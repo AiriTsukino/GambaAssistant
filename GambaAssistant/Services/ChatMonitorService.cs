@@ -371,6 +371,12 @@ public sealed class ChatMonitorService : IDisposable
 
     private void TryDetectTrade(string sender, string body, string chatType)
     {
+        if (!trades.AutomaticDetectionEnabled)
+        {
+            ClearTradeConversationState();
+            return;
+        }
+
         if (!IsSystemTradeChatLine(chatType, sender, body))
             return;
 
@@ -397,7 +403,7 @@ public sealed class ChatMonitorService : IDisposable
             if (!string.IsNullOrWhiteSpace(playerName))
             {
                 trades.MarkTradeWindowActive(playerName);
-                trades.TryAddDetectedIncomingTrade(playerName, namedAmount, "Detected named incoming gil trade confirmed by Trade window");
+                trades.TryAddDetectedIncomingTrade(playerName, namedAmount, "Detected named incoming gil trade from trusted system log");
                 return;
             }
         }
@@ -413,14 +419,13 @@ public sealed class ChatMonitorService : IDisposable
             return;
         }
 
-        // Outgoing cash-out lines are often amount-only in the client log, for
-        // example: "You hand over 50,000 gil." Attribute them to the active
-        // outgoing trade recipient captured from the trade request/confirmation
-        // sequence, regardless of Blackjack phase.
+        // Amount-only transfer lines are attributed only to the player captured
+        // from the trusted trade request/confirmation sequence. Target and
+        // single-player guesses are intentionally not used.
         var outgoingAmountOnlyMatch = OutgoingTradeAmountOnlyRegex.Match(combined);
         if (outgoingAmountOnlyMatch.Success && TryParseGilAmount(outgoingAmountOnlyMatch.Groups["amount"].Value, out var outgoingAmountOnly))
         {
-            var outgoingPlayer = GetFreshTradePlayer("outgoing");
+            var outgoingPlayer = GetFreshTradePlayer();
             if (!string.IsNullOrWhiteSpace(outgoingPlayer))
             {
                 trades.TryAddSystemConfirmedOutgoingTrade(outgoingPlayer, outgoingAmountOnly, "Detected outgoing gil amount from trusted system log and active trade sequence");
@@ -428,30 +433,13 @@ public sealed class ChatMonitorService : IDisposable
                 return;
             }
 
-            var outgoingTargetPlayer = trades.ResolveCurrentTargetTradeCandidate();
-            if (outgoingTargetPlayer is not null)
-            {
-                trades.TryAddSystemConfirmedOutgoingTrade(outgoingTargetPlayer.DisplayName, outgoingAmountOnly, "Detected outgoing gil amount from trusted system log and current trade target");
-                pendingTradeLastAmount = outgoingAmountOnly;
-                return;
-            }
-
-            var singleOutgoingPlayer = trades.ResolveSingleTrackedTradeCandidate();
-            if (singleOutgoingPlayer is null)
-            {
-                log.Add(LogCategory.Warnings, $"Detected outgoing gil amount {outgoingAmountOnly:N0}, but no active outgoing trade recipient was known and there is not exactly one eligible tracked player. Line: sender='{sender}', body='{body}'.");
-                return;
-            }
-
-            trades.TryAddSystemConfirmedOutgoingTrade(singleOutgoingPlayer.DisplayName, outgoingAmountOnly, "Detected outgoing gil amount from trusted system log and only eligible tracked player");
-            pendingTradeLastAmount = outgoingAmountOnly;
+            log.Add(LogCategory.Warnings, $"Detected outgoing gil amount {outgoingAmountOnly:N0}, but no current-party recipient was captured from the active trade sequence. Line: sender='{sender}', body='{body}'.");
             return;
         }
 
         // Many FFXIV system trade lines only expose the amount, for example
-        // "You receive 50,000 gil." with no sender. Attribute it to the active
-        // incoming trade sender when available; otherwise only guess when there
-        // is exactly one eligible tracked party player.
+        // "You receive 50,000 gil." Attribute them to the current-party player
+        // captured from the trusted trade sequence.
         var amountOnlyMatch = IncomingTradeAmountOnlyRegex.Match(combined);
         if (!amountOnlyMatch.Success || !TryParseGilAmount(amountOnlyMatch.Groups["amount"].Value, out var amountOnly))
         {
@@ -464,39 +452,25 @@ public sealed class ChatMonitorService : IDisposable
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(cleanedSender) && !NameMatchesDealer(cleanedSender, GetLocalCharacterName()))
+        if (!string.IsNullOrWhiteSpace(cleanedSender)
+            && !NameMatchesDealer(cleanedSender, GetLocalCharacterName())
+            && TradeMonitorService.TryResolveCurrentPartyMember(cleanedSender, out _))
         {
-            trades.TryAddDetectedIncomingTrade(cleanedSender, amountOnly, "Detected incoming gil amount confirmed by Trade window and chat sender");
+            trades.TryAddDetectedIncomingTrade(cleanedSender, amountOnly, "Detected incoming gil amount from trusted system log and party-member sender");
             pendingTradePlayerName = null;
             pendingTradeLastAmount = amountOnly;
             return;
         }
 
-        var pendingPlayer = GetFreshTradePlayer("incoming");
+        var pendingPlayer = GetFreshTradePlayer();
         if (!string.IsNullOrWhiteSpace(pendingPlayer))
         {
-            trades.TryAddDetectedIncomingTrade(pendingPlayer, amountOnly, "Detected incoming gil amount confirmed by Trade window and active trade sequence");
+            trades.TryAddDetectedIncomingTrade(pendingPlayer, amountOnly, "Detected incoming gil amount from trusted system log and active trade sequence");
             pendingTradeLastAmount = amountOnly;
             return;
         }
 
-        var targetPlayer = trades.ResolveCurrentTargetTradeCandidate();
-        if (targetPlayer is not null)
-        {
-            trades.TryAddDetectedIncomingTrade(targetPlayer.DisplayName, amountOnly, "Detected incoming gil amount confirmed by Trade window and current trade target");
-            pendingTradeLastAmount = amountOnly;
-            return;
-        }
-
-        var singlePlayer = trades.ResolveSingleTrackedTradeCandidate();
-        if (singlePlayer is null)
-        {
-            log.Add(LogCategory.Warnings, $"Detected incoming gil amount {amountOnly:N0}, but the chat line did not include a player name and there is not exactly one eligible tracked player. Line: sender='{sender}', body='{body}'.");
-            return;
-        }
-
-        trades.TryAddDetectedIncomingTrade(singlePlayer.DisplayName, amountOnly, "Detected incoming gil amount confirmed by Trade window and only eligible tracked player");
-        pendingTradeLastAmount = amountOnly;
+        log.Add(LogCategory.Warnings, $"Detected incoming gil amount {amountOnly:N0}, but no current-party sender was captured from the active trade sequence. Line: sender='{sender}', body='{body}'.");
     }
 
     private void TrackTradeConversation(string combined, string sender, string body)
@@ -573,17 +547,39 @@ public sealed class ChatMonitorService : IDisposable
         if (string.IsNullOrWhiteSpace(name))
             return;
 
-        pendingTradePlayerName = name;
+        if (!TradeMonitorService.TryResolveCurrentPartyMember(name, out var partyMember))
+        {
+            ClearTradeConversationState();
+            log.Add(LogCategory.Trades, $"Ignored {source} for {name}: the player is not currently in the party.");
+            return;
+        }
+
+        pendingTradePlayerName = partyMember.Display;
         pendingTradeDirection = direction;
         pendingTradeStartedUtc = DateTime.UtcNow;
         pendingTradeLastAmount = 0;
-        trades.MarkTradeWindowActive(name);
-        log.Add(LogCategory.Trades, $"Detected {source} for {name}; the next amount-only gil line will be attributed to this player based on whether the log says you received or handed over gil. sender='{sender}', body='{body}'.");
+        trades.MarkTradeWindowActive(partyMember.Display);
+        log.Add(LogCategory.Trades, $"Detected {source} for current party member {partyMember.Display}; the next trusted amount-only gil line will be attributed by transfer direction. sender='{sender}', body='{body}'.");
     }
 
-    private string? GetFreshTradePlayer(string expectedDirection)
+    private void ClearTradeConversationState()
     {
-        if (IsFreshTradeAttribution(pendingTradePlayerName, pendingTradeDirection, pendingTradeStartedUtc, TimeSpan.FromMinutes(2), expectedDirection))
+        pendingTradePlayerName = null;
+        pendingTradeDirection = null;
+        pendingTradeStartedUtc = DateTime.MinValue;
+        pendingTradeLastAmount = 0;
+        recentlyCompletedTradePlayerName = null;
+        recentlyCompletedTradeDirection = null;
+        recentlyCompletedTradeUtc = DateTime.MinValue;
+        trades.MarkTradeWindowClosed();
+    }
+
+    private string? GetFreshTradePlayer()
+    {
+        // The request initiator does not determine gil direction. Either participant
+        // can place gil in the window, so the trusted "receive" / "hand over" amount
+        // line determines the bank operation while this state only identifies player.
+        if (IsFreshTradeAttribution(pendingTradePlayerName, pendingTradeStartedUtc, TimeSpan.FromMinutes(2)))
             return pendingTradePlayerName;
 
         if (!string.IsNullOrWhiteSpace(pendingTradePlayerName) && DateTime.UtcNow - pendingTradeStartedUtc > TimeSpan.FromMinutes(2))
@@ -595,25 +591,18 @@ public sealed class ChatMonitorService : IDisposable
             trades.MarkTradeWindowClosed();
         }
 
-        if (IsFreshTradeAttribution(recentlyCompletedTradePlayerName, recentlyCompletedTradeDirection, recentlyCompletedTradeUtc, TimeSpan.FromSeconds(10), expectedDirection))
+        if (IsFreshTradeAttribution(recentlyCompletedTradePlayerName, recentlyCompletedTradeUtc, TimeSpan.FromSeconds(10)))
             return recentlyCompletedTradePlayerName;
 
         return null;
     }
 
-    private static bool IsFreshTradeAttribution(string? playerName, string? direction, DateTime startedUtc, TimeSpan maxAge, string expectedDirection)
+    private static bool IsFreshTradeAttribution(string? playerName, DateTime startedUtc, TimeSpan maxAge)
     {
         if (string.IsNullOrWhiteSpace(playerName))
             return false;
 
-        if (DateTime.UtcNow - startedUtc > maxAge)
-            return false;
-
-        if (string.IsNullOrWhiteSpace(expectedDirection))
-            return true;
-
-        return string.Equals(direction, expectedDirection, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(direction, "active", StringComparison.OrdinalIgnoreCase);
+        return DateTime.UtcNow - startedUtc <= maxAge;
     }
 
     private static bool NamesLooselyMatch(string? left, string? right)

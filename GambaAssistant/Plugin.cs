@@ -53,7 +53,7 @@ public sealed class Plugin : IDalamudPlugin
             party = new PartyService(log);
             players = new PlayerSessionService(session, log);
             ledger = new DealerLedgerService(session, log);
-            tradeMonitor = new TradeMonitorService(session, ledger, log);
+            tradeMonitor = new TradeMonitorService(config, session, ledger, log);
             chatQueue.SetActionCommandDelayPredicate(() => tradeMonitor.IsTradeWindowLikelyOpen);
             dice = new DiceService(session, chatQueue, log);
             chatMonitor = new ChatMonitorService(dice, tradeMonitor, log);

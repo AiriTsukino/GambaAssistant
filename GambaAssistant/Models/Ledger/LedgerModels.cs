@@ -66,7 +66,7 @@ public sealed class DealerLedger
     public long TotalBets { get; set; }
     public long TotalPayouts { get; set; }
     public long TotalCashOuts { get; set; }
-    public long ExpectedDealerGil => StartingGil + GameProfitLoss + DealerTips + VenueTips + MiscAdjustments + TotalBuyInsDeposits - TotalCashOuts;
+    public long ExpectedDealerGil => StartingGil + GameProfitLoss + DealerTips + VenueTips + MiscAdjustments;
     public long? ActualEndingGil { get; set; }
     public long? Difference => ActualEndingGil.HasValue ? ActualEndingGil.Value - ExpectedDealerGil : null;
     public List<TradeEntry> Trades { get; set; } = [];

@@ -177,7 +177,7 @@ public sealed class TableTab
         {
             var ledger = dealerLedger.Ledger;
             ImGui.TextColored(GambaTheme.Gold, $"Dealer tracked gil: {dealerLedger.ExpectedDealerGil:N0} gil");
-            DrawWrappedDisabled($"Starting {ledger.StartingGil:N0} + deposits/tips/adjustments - cash-outs - outstanding player banks ({dealerLedger.OutstandingPlayerBanks:N0})");
+            DrawWrappedDisabled($"Starting {ledger.StartingGil:N0} + settled game P/L ({ledger.GameProfitLoss:N0}) + tips + adjustments");
             if (ledger.ActualEndingGil.HasValue)
                 DrawWrappedDisabled($"Actual ending gil entered: {ledger.ActualEndingGil.Value:N0} gil | Difference: {dealerLedger.Difference.GetValueOrDefault():N0} gil");
             ImGui.Separator();

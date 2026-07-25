@@ -17,12 +17,9 @@ public sealed class DealerLedgerService
         .Sum(g => g.Max(p => p.Bank.TotalTracked));
 
     public long LiveGameProfitLoss => Ledger.TotalBuyInsDeposits - Ledger.TotalCashOuts - OutstandingPlayerBanks;
+    public long BankTrackingDifference => LiveGameProfitLoss - Ledger.GameProfitLoss;
 
-    public long ExpectedDealerGil => Ledger.StartingGil
-        + LiveGameProfitLoss
-        + Ledger.DealerTips
-        + Ledger.VenueTips
-        + Ledger.MiscAdjustments;
+    public long ExpectedDealerGil => Ledger.ExpectedDealerGil;
 
     public long? Difference => Ledger.ActualEndingGil.HasValue
         ? Ledger.ActualEndingGil.Value - ExpectedDealerGil

@@ -8,19 +8,32 @@ namespace GambaAssistant.Services;
 
 public sealed unsafe class TradeMonitorService
 {
+    private static readonly TimeSpan DuplicateTradeWindow = TimeSpan.FromSeconds(5);
+    private readonly Configuration config;
     private readonly BlackjackSession session;
     private readonly DealerLedgerService ledger;
     private readonly LogService log;
     private readonly HashSet<long> observedTradeGilAmounts = [];
+    private readonly Dictionary<string, DateTime> recentAutomaticTrades = new(StringComparer.OrdinalIgnoreCase);
     private DateTime tradeWindowLikelyOpenUntilUtc = DateTime.MinValue;
     private DateTime nextTradeWindowPollAtUtc = DateTime.MinValue;
     private DateTime lastTradeWindowSeenAtUtc = DateTime.MinValue;
     private DateTime lastTradeAmountObservedAtUtc = DateTime.MinValue;
     private string lastObservedTradeAmountSignature = string.Empty;
     public List<TradeEntry> Trades { get; } = [];
+    public bool AutomaticDetectionEnabled => config.General.AutomaticTradeDetectionEnabled;
     public bool IsTradeWindowLikelyOpen => DateTime.UtcNow < tradeWindowLikelyOpenUntilUtc;
-    public string DetectionStatus { get; private set; } = "Trade detection confirms gil with the real Trade window before applying incoming deposits or outgoing cash-outs. Manual entry remains available as a fallback.";
-    public TradeMonitorService(BlackjackSession session, DealerLedgerService ledger, LogService log) { this.session = session; this.ledger = ledger; this.log = log; }
+    public string DetectionStatus => AutomaticDetectionEnabled
+        ? "Automatic detection is on. Trusted FFXIV system trade messages adjust banks for current party members at any Blackjack phase; normal player chat is ignored."
+        : "Automatic detection is off. Use manual trade entry to adjust player banks.";
+
+    public TradeMonitorService(Configuration config, BlackjackSession session, DealerLedgerService ledger, LogService log)
+    {
+        this.config = config;
+        this.session = session;
+        this.ledger = ledger;
+        this.log = log;
+    }
 
     public TradeEntry AddManualTrade(PlayerIdentity from, PlayerIdentity to, long amount, TradeClassification classification, string note = "Manual entry")
         => AddTrade(from, to, amount, classification, note, manual: true);
@@ -42,6 +55,12 @@ public sealed unsafe class TradeMonitorService
 
     public void Tick()
     {
+        if (!AutomaticDetectionEnabled)
+        {
+            MarkTradeWindowClosed();
+            return;
+        }
+
         var now = DateTime.UtcNow;
         if (now < nextTradeWindowPollAtUtc)
             return;
@@ -76,15 +95,18 @@ public sealed unsafe class TradeMonitorService
 
     public bool TryAddDetectedIncomingTrade(string playerName, long amount, string note = "Detected confirmed incoming gil trade")
     {
+        if (!AutomaticDetectionEnabled)
+            return false;
+
         if (!TryResolveCurrentPartyMember(playerName, out var partyMember))
         {
             log.Add(LogCategory.Warnings, $"Ignored incoming gil trade from {playerName}: player is not currently in the party.");
             return false;
         }
 
-        if (!IsGilAmountConfirmedByTradeWindow(amount, out var reason))
+        if (amount <= 0)
         {
-            log.Add(LogCategory.Warnings, $"Ignored incoming gil line for {partyMember.Display}: {amount:N0} gil was not confirmed by the Trade window. {reason}");
+            log.Add(LogCategory.Warnings, $"Ignored incoming gil line for {partyMember.Display}: amount was not positive.");
             return false;
         }
 
@@ -94,6 +116,9 @@ public sealed unsafe class TradeMonitorService
 
     public bool TryAddDetectedOutgoingTrade(string playerName, long amount, string note = "Detected confirmed outgoing gil trade")
     {
+        if (!AutomaticDetectionEnabled)
+            return false;
+
         if (!TryResolveCurrentPartyMember(playerName, out var partyMember))
         {
             log.Add(LogCategory.Warnings, $"Ignored outgoing gil trade to {playerName}: player is not currently in the party.");
@@ -112,6 +137,9 @@ public sealed unsafe class TradeMonitorService
 
     public bool TryAddSystemConfirmedOutgoingTrade(string playerName, long amount, string note = "Detected confirmed outgoing gil trade from system log")
     {
+        if (!AutomaticDetectionEnabled)
+            return false;
+
         if (!TryResolveCurrentPartyMember(playerName, out var partyMember))
         {
             log.Add(LogCategory.Warnings, $"Ignored outgoing gil trade to {playerName}: player is not currently in the party.");
@@ -160,7 +188,7 @@ public sealed unsafe class TradeMonitorService
         return AddTrade(dealer.Identity, player.Identity, amount, TradeClassification.CashOut, note, manual: false);
     }
 
-    private static bool TryResolveCurrentPartyMember(string playerName, out PlayerIdentity identity)
+    public static bool TryResolveCurrentPartyMember(string playerName, out PlayerIdentity identity)
     {
         identity = default;
         var normalizedName = NormalizeName(playerName);
@@ -308,6 +336,12 @@ public sealed unsafe class TradeMonitorService
     private TradeEntry AddTrade(PlayerIdentity from, PlayerIdentity to, long amount, TradeClassification classification, string note, bool manual)
     {
         amount = Math.Max(0, amount);
+        if (!manual && IsDuplicateAutomaticTrade(from, to, amount, classification, out var duplicate))
+        {
+            log.Add(LogCategory.Warnings, $"Ignored duplicate automatic trade: {from.Display} → {to.Display} {amount:N0} gil as {classification}.");
+            return duplicate;
+        }
+
         var entry = new TradeEntry
         {
             From = from,
@@ -320,11 +354,63 @@ public sealed unsafe class TradeMonitorService
         };
 
         Trades.Add(entry);
+        if (!manual)
+            RememberAutomaticTrade(entry);
         ApplyTradeEffects(entry);
         ledger.RecordTrade(entry);
         log.Add(LogCategory.Trades, $"{(manual ? "Manual" : "Detected")} trade entered: {from.Display} → {to.Display} {amount:N0} gil as {classification}.");
         return entry;
     }
+
+    private bool IsDuplicateAutomaticTrade(
+        PlayerIdentity from,
+        PlayerIdentity to,
+        long amount,
+        TradeClassification classification,
+        out TradeEntry duplicate)
+    {
+        var now = DateTime.UtcNow;
+        foreach (var staleKey in recentAutomaticTrades
+                     .Where(pair => now - pair.Value > DuplicateTradeWindow)
+                     .Select(pair => pair.Key)
+                     .ToList())
+            recentAutomaticTrades.Remove(staleKey);
+
+        var key = BuildAutomaticTradeKey(from, to, amount, classification);
+        if (!recentAutomaticTrades.TryGetValue(key, out var recordedAt)
+            || now - recordedAt > DuplicateTradeWindow)
+        {
+            duplicate = null!;
+            return false;
+        }
+
+        duplicate = Trades.LastOrDefault(entry =>
+            !entry.Manual
+            && entry.Amount == amount
+            && entry.Classification == classification
+            && string.Equals(NormalizeName(entry.From.Display), NormalizeName(from.Display), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(NormalizeName(entry.To.Display), NormalizeName(to.Display), StringComparison.OrdinalIgnoreCase))
+            ?? new TradeEntry
+            {
+                From = from,
+                To = to,
+                Amount = amount,
+                Classification = TradeClassification.IgnoreDuplicateInvalid,
+                Phase = session.Round.Phase.ToString(),
+                Note = "Duplicate automatic trade ignored"
+            };
+        return true;
+    }
+
+    private void RememberAutomaticTrade(TradeEntry entry)
+        => recentAutomaticTrades[BuildAutomaticTradeKey(entry.From, entry.To, entry.Amount, entry.Classification)] = DateTime.UtcNow;
+
+    private static string BuildAutomaticTradeKey(
+        PlayerIdentity from,
+        PlayerIdentity to,
+        long amount,
+        TradeClassification classification)
+        => $"{classification}|{NormalizeName(from.Display)}|{NormalizeName(to.Display)}|{amount}";
 
     private void ApplyTradeEffects(TradeEntry entry)
     {
